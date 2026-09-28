@@ -60,5 +60,6 @@ https://github.com/pengpaiz/dfh.tys/issues
 感谢 Arty Bishop 及 Look4Sat contributors 对业余卫星跟踪软件生态的贡献。
 
 73！📡
+循此苦旅，终抵群星
 <img width="888" height="628" alt="image" src="https://github.com/user-attachments/assets/66eb61b4-d5a9-4ed8-8321-a42969282d31" />
 
