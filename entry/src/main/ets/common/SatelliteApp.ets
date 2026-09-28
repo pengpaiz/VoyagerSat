@@ -11,10 +11,14 @@ import { SatOrbitalData } from '../domain/predict/OrbitalData';
 import { SatGeoPos } from '../domain/predict/GeoPos';
 import { Locator } from './Locator';
 import { AppSettings } from './AppSettings';
+import { bytesToString } from './utils/TextUtils';
 
 const STATION_LAT = 'station_latitude';
 const STATION_LON = 'station_longitude';
 const STATION_ALT = 'station_altitude';
+
+const RAWFILE_TLE_SNAPSHOT = 'tle_snapshot.txt';
+const RAWFILE_TRANSPONDER_SNAPSHOT = 'transponder_snapshot.json';
 
 export const ISS_CATNUM = 25544;
 
@@ -52,14 +56,22 @@ export class SatelliteApp {
       return;
     }
     this.startupDone = true;
-    // 静默下载（若已有数据则仍刷新一次）
+    // 首次使用且无本地数据：立即从内置快照离线导入，保证第一次打开即可展示数据
+    if (this.store.getAll().length === 0) {
+      const seeded = await this.seedFromSnapshot();
+      if (seeded > 0) {
+        this.bumpDataVersion();
+      }
+    }
+    // 静默联网更新（国内镜像 -> Celestrak 回退），失败时保留快照数据
     try {
-      const result = await this.downloader.downloadFromMirror();
+      const result = await this.downloader.downloadWithFallback();
       this.store.replaceAll(result.dataList);
       this.store.dedupeKeepFreshest();
       await this.store.save();
+      this.bumpDataVersion();
     } catch (e) {
-      // 静默忽略下载失败
+      // 无网络时保留本地/快照数据
     }
     try {
       const t = await this.downloader.downloadTransponders();
@@ -82,12 +94,57 @@ export class SatelliteApp {
   }
 
   async downloadAndStore(): Promise<number> {
-    const result = await this.downloader.downloadFromMirror();
-    this.store.replaceAll(result.dataList);
+    let dataList: SatOrbitalData[] | null = null;
+    try {
+      const result = await this.downloader.downloadWithFallback();
+      dataList = result.dataList;
+    } catch (e) {
+      // 所有在线源失败：无本地数据时回退内置快照，否则抛出提示
+      if (this.store.getAll().length === 0) {
+        const seeded = await this.seedFromSnapshot();
+        if (seeded > 0) {
+          this.bumpDataVersion();
+          return seeded;
+        }
+      }
+      const msg = e instanceof Error ? e.message : 'download failed';
+      throw new Error(msg);
+    }
+    this.store.replaceAll(dataList);
     this.store.dedupeKeepFreshest();
     await this.store.save();
     this.bumpDataVersion();
     return this.store.getAll().length;
+  }
+
+  /** 从 rawfile 内置快照离线导入，返回导入的卫星数（失败返回 0）。 */
+  private async seedFromSnapshot(): Promise<number> {
+    if (this.ctx === null) {
+      return 0;
+    }
+    try {
+      const raw = await this.ctx.resourceManager.getRawFileContent(RAWFILE_TLE_SNAPSHOT);
+      const text = bytesToString(raw);
+      const result = this.downloader.parseTLEText(text);
+      if (result.count === 0) {
+        return 0;
+      }
+      this.store.replaceAll(result.dataList);
+      this.store.dedupeKeepFreshest();
+      await this.store.save();
+      try {
+        const rawT = await this.ctx.resourceManager.getRawFileContent(RAWFILE_TRANSPONDER_SNAPSHOT);
+        const textT = bytesToString(rawT);
+        const t = this.downloader.parseTransponderText(textT);
+        this.store.setTransponders(t.transponders);
+        await this.store.saveTransponders();
+      } catch (e) {
+        // 转发器快照可选
+      }
+      return this.store.getAll().length;
+    } catch (e) {
+      return 0;
+    }
   }
 
   private bumpDataVersion(): void {

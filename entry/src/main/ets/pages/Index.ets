@@ -1,5 +1,7 @@
 import { SatelliteListPage } from '../view/pages/SatelliteListPage';
 import { PassesPage } from '../view/pages/PassesPage';
+import { MapPage } from '../view/pages/MapPage';
+import { CalendarPage } from '../view/pages/CalendarPage';
 import { SettingsPage } from '../view/pages/SettingsPage';
 import { SatelliteApp } from '../common/SatelliteApp';
 import { SelectedSats } from '../common/SelectedSats';
@@ -8,7 +10,7 @@ import { AppSettings } from '../common/AppSettings';
 @Entry
 @Component
 struct Index {
-  @State currentIndex: number = 1;
+  @State currentIndex: number = 2;
   private tabsController: TabsController = new TabsController();
   private app: SatelliteApp = SatelliteApp.getInstance();
 
@@ -16,9 +18,10 @@ struct Index {
     this.app.init(getContext(this));
     SelectedSats.init();
     AppSettings.init();
-    this.app.loadFromDisk();
-    // 启动时静默更新数据与定位
-    this.app.silentStartupUpdate();
+    // 先加载本地数据，再静默联网更新，避免竞态导致首页空白
+    this.app.loadFromDisk().then((): void => {
+      this.app.silentStartupUpdate();
+    });
   }
 
   @Builder
@@ -43,16 +46,27 @@ struct Index {
       .tabBar(this.tabBar('🛰', '卫星', 0))
 
       TabContent() {
+        MapPage()
+      }
+      .tabBar(this.tabBar('🗺', '地图', 1))
+
+      TabContent() {
         PassesPage()
       }
-      .tabBar(this.tabBar('📡', '过境', 1))
+      .tabBar(this.tabBar('📡', '过境', 2))
+
+      TabContent() {
+        CalendarPage()
+      }
+      .tabBar(this.tabBar('📅', '日历', 3))
 
       TabContent() {
         SettingsPage()
       }
-      .tabBar(this.tabBar('⚙', '设置', 2))
+      .tabBar(this.tabBar('⚙', '设置', 4))
     }
     .barMode(BarMode.Fixed)
+    .barBackgroundColor($r('app.color.color_tab_bar'))
     .onChange((index: number): void => {
       this.currentIndex = index
     })

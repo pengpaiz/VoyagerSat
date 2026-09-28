@@ -13,6 +13,7 @@ export struct SatelliteListPage {
   @State selectedCount: number = 0;
   @StorageLink('selected_cats') selectedCats: number[] = [];
   @StorageProp('selected_version') @Watch('onSelectionChanged') selVersion: number = 0;
+  @StorageLink('data_version') @Watch('onSelectionChanged') dataVersion: number = 0;
 
   @State searchVisible: boolean = false;
   @State searchQuery: string = '';
@@ -150,7 +151,7 @@ export struct SatelliteListPage {
   }
 
   private datasetColor(item: SatOrbitalData): ResourceColor {
-    return item.isDeepSpace ? '#E67E22' : '#0A59F7';
+    return item.isDeepSpace ? '#E67E22' : '#2ECC71';
   }
 
   build() {
@@ -257,20 +258,18 @@ export struct SatelliteListPage {
                 .layoutWeight(1)
                 .alignItems(HorizontalAlign.Start)
 
-                Text(SelectedSats.isSelected(s.catnum) ? '已选' : '选择')
-                  .fontSize(12)
-                  .fontColor(SelectedSats.isSelected(s.catnum) ? '#FFFFFF' : $r('app.color.color_primary'))
-                  .backgroundColor(SelectedSats.isSelected(s.catnum) ? $r('app.color.color_primary') : $r('app.color.color_card'))
-                  .borderRadius(14)
-                  .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+                Toggle({ type: ToggleType.Switch, isOn: this.isSelectedLocal(s.catnum) })
+                  .selectedColor($r('app.color.color_primary'))
+                  .onChange((isOn: boolean): void => {
+                    if (isOn !== this.isSelectedLocal(s.catnum)) {
+                      SelectedSats.toggle(s.catnum)
+                    }
+                  })
               }
               .width('100%')
               .padding(8)
               .backgroundColor($r('app.color.color_card'))
               .borderRadius(8)
-              .onClick((): void => {
-                SelectedSats.toggle(s.catnum)
-              })
             }
           }, (s: SatOrbitalData): string => {
             return String(s.catnum)

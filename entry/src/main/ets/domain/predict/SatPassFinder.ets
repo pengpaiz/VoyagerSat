@@ -39,22 +39,27 @@ export class SatPassFinder {
   getPasses(obj: SatOrbitalObject, pos: SatGeoPos, time: number, hours: number): SatPassEvent[] {
     const passes: SatPassEvent[] = [];
     const endDate = time + hours * 60 * 60 * 1000;
+    if (obj.data.hasDecayed(time)) {
+      return passes;
+    }
     const period = obj.data.orbitalPeriod;
     const quarterOrbitMin = Math.floor(period / 4.0);
-    const decayed = obj.data.hasDecayed(time);
     let startDate = time;
     let shouldRewind = true;
     let count = 0;
     if (obj.willBeSeen(pos)) {
       if (obj.data.isDeepSpace) {
-        passes.push(this.getGeoPass(obj, pos, time, decayed));
+        passes.push(this.getGeoPass(obj, pos, time));
       } else {
         let lastAosDate: number;
         do {
           if (count > 0) {
             shouldRewind = false;
           }
-          const pass = this.getLeoPass(obj, pos, startDate, shouldRewind, decayed);
+          const pass = this.getLeoPass(obj, pos, startDate, shouldRewind, endDate);
+          if (pass === null) {
+            break;
+          }
           lastAosDate = pass.aosTime;
           passes.push(pass);
           startDate = pass.losTime + (quarterOrbitMin * 3) * 60 * 1000;
@@ -66,7 +71,7 @@ export class SatPassFinder {
     return passes;
   }
 
-  private getGeoPass(sat: SatOrbitalObject, pos: SatGeoPos, time: number, decayed: boolean): SatPassEvent {
+  private getGeoPass(sat: SatOrbitalObject, pos: SatGeoPos, time: number): SatPassEvent {
     const satPos = sat.getPosition(pos, time);
     const aos = time - 24 * 60 * 60 * 1000;
     const los = time + 24 * 60 * 60 * 1000;
@@ -76,8 +81,9 @@ export class SatPassFinder {
   }
 
   private getLeoPass(sat: SatOrbitalObject, pos: SatGeoPos, time: number, rewind: boolean,
-                     decayed: boolean): SatPassEvent {
+                     endDate: number): SatPassEvent | null {
     const quarterOrbitMin = Math.floor(sat.data.orbitalPeriod / 4.0);
+    const searchLimit = endDate + Math.ceil(sat.data.orbitalPeriod) * 60 * 1000;
     let calendarTimeMillis = time;
     let elevation: number;
     let maxElevation = 0.0;
@@ -89,6 +95,9 @@ export class SatPassFinder {
     if (sat.getElevation(pos, calendarTimeMillis) > 0.0) {
       do {
         calendarTimeMillis += 30 * 1000;
+        if (calendarTimeMillis > searchLimit) {
+          return null;
+        }
       } while (sat.getElevation(pos, calendarTimeMillis) > 0.0);
       calendarTimeMillis += quarterOrbitMin * 3 * 60 * 1000;
     }
@@ -96,7 +105,13 @@ export class SatPassFinder {
     // find next time above horizon (coarse 60s)
     do {
       calendarTimeMillis += 60 * 1000;
+      if (calendarTimeMillis > endDate) {
+        return null;
+      }
       elevation = sat.getElevation(pos, calendarTimeMillis);
+      if (!Number.isFinite(elevation)) {
+        return null;
+      }
       if (elevation > maxElevation) {
         maxElevation = elevation;
       }
@@ -107,6 +122,9 @@ export class SatPassFinder {
     do {
       calendarTimeMillis += 500;
       elevation = sat.getElevation(pos, calendarTimeMillis);
+      if (!Number.isFinite(elevation)) {
+        return null;
+      }
       if (elevation > maxElevation) {
         maxElevation = elevation;
       }
@@ -120,24 +138,34 @@ export class SatPassFinder {
     do {
       calendarTimeMillis += 30 * 1000;
       elevation = sat.getElevation(pos, calendarTimeMillis);
+      if (!Number.isFinite(elevation)) {
+        break;
+      }
       if (elevation > maxElevation) {
         maxElevation = elevation;
       }
-    } while (elevation > 0.0);
+    } while (elevation > 0.0 && calendarTimeMillis < searchLimit);
 
     // refine LOS to ~500ms
     calendarTimeMillis -= 30 * 1000;
     do {
       calendarTimeMillis += 500;
       elevation = sat.getElevation(pos, calendarTimeMillis);
+      if (!Number.isFinite(elevation)) {
+        break;
+      }
       if (elevation > maxElevation) {
         maxElevation = elevation;
       }
-    } while (elevation > 0.0);
+    } while (elevation > 0.0 && calendarTimeMillis < searchLimit);
 
     const losPos = sat.getFullPosition(pos, calendarTimeMillis);
     const los = 1000 * Math.round((losPos.time + 500) / 1000);
     const losAz = this.roundDeg(toDegrees(losPos.azimuth));
+
+    if (!Number.isFinite(aos) || !Number.isFinite(los) || !Number.isFinite(maxElevation)) {
+      return null;
+    }
 
     const tcaTime = (aos + los) / 2;
     const tcaPos = sat.getFullPosition(pos, tcaTime);

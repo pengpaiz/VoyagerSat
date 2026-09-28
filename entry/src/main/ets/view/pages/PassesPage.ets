@@ -1,18 +1,15 @@
 import { SatelliteApp } from '../../common/SatelliteApp';
 import { SelectedSats } from '../../common/SelectedSats';
 import { AppSettings, PassSortMode } from '../../common/AppSettings';
+import { SAT_COLORS } from '../../common/SatColors';
 import { SatOrbitalData } from '../../domain/predict/OrbitalData';
 import { createOrbitalObject } from '../../domain/predict/OrbitalFactory';
 import { SatPassEvent, SatPassFinder } from '../../domain/predict/SatPassFinder';
 import { PassDetailSheet, PassDetailPayload } from '../components/PassDetailSheet';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 
-const SAT_COLORS: string[] = [
-  '#0A59F7', '#E67E22', '#2ECC71', '#E74C3C', '#8E44AD', '#16A085',
-  '#F39C12', '#3498DB', '#C0392B', '#27AE60', '#9B59B6', '#7F8C8D'
-];
-
 const MAX_WINDOW_H = 48;
+const NOW_REFRESH_MS = 1000;
 
 class PassSat {
   catnum: number;
@@ -42,6 +39,41 @@ class FlatPass {
   }
 }
 
+/** 独立子组件：过境进度条。父级每秒刷新 nowTs 传入 @Prop，保证列表项不重建也能更新。 */
+@Component
+export struct PassProgressBar {
+  @Prop nowTs: number = 0;
+  @Prop aosTime: number = 0;
+  @Prop losTime: number = 0;
+  @Prop showLabel: boolean = false;
+
+  private progress(): number {
+    const dur = Math.max(1, this.losTime - this.aosTime);
+    return Math.max(0, Math.min(1, (this.nowTs - this.aosTime) / dur));
+  }
+
+  build() {
+    Row({ space: 8 }) {
+      if (this.showLabel) {
+        Text('● 过境中')
+          .fontSize(11)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#E6A23C')
+      }
+      Progress({ value: Math.round(this.progress() * 100), total: 100, type: ProgressType.Linear })
+        .width('100%')
+        .layoutWeight(1)
+        .color('#E6A23C')
+        .backgroundColor('#3D3D3D')
+        .height(6)
+      Text(`${Math.round(this.progress() * 100)}%`)
+        .fontSize(11)
+        .fontColor($r('app.color.color_text_secondary'))
+    }
+    .width('100%')
+  }
+}
+
 @Component
 export struct PassesPage {
   @State groups: PassSat[] = [];
@@ -60,9 +92,20 @@ export struct PassesPage {
 
   private app: SatelliteApp = SatelliteApp.getInstance();
   private finder: SatPassFinder = new SatPassFinder();
+  private nowTimerId: number = -1;
 
   aboutToAppear(): void {
     this.recompute();
+    this.nowTimerId = setInterval((): void => {
+      this.nowTs = Date.now();
+    }, NOW_REFRESH_MS);
+  }
+
+  aboutToDisappear(): void {
+    if (this.nowTimerId >= 0) {
+      clearInterval(this.nowTimerId);
+      this.nowTimerId = -1;
+    }
   }
 
   recompute(): void {
@@ -101,10 +144,38 @@ export struct PassesPage {
           flat.push(new FlatPass(s.catnum, s.name, s.color, s.passes[j]));
         }
       }
-      flat.sort((a: FlatPass, b: FlatPass): number => a.pass.aosTime - b.pass.aosTime);
+      flat.sort((a: FlatPass, b: FlatPass): number => {
+        const ta = this.distanceToPass(a.pass);
+        const tb = this.distanceToPass(b.pass);
+        if (ta !== tb) {
+          return ta - tb;
+        }
+        return a.pass.aosTime - b.pass.aosTime;
+      });
       this.flatPasses = flat;
       this.groups = [];
     }
+  }
+
+  /** 距离过境时间的远近：正在过境=0，否则为距 AOS 的毫秒数。 */
+  private distanceToPass(p: SatPassEvent): number {
+    if (this.isInPass(p)) {
+      return 0;
+    }
+    return Math.max(0, p.aosTime - this.nowTs);
+  }
+
+  private isInPass(p: SatPassEvent): boolean {
+    return this.nowTs >= p.aosTime && this.nowTs <= p.losTime;
+  }
+
+  private passProgress(p: SatPassEvent): number {
+    if (!this.isInPass(p)) {
+      return 0;
+    }
+    const dur = Math.max(1, p.losTime - p.aosTime);
+    const v = (this.nowTs - p.aosTime) / dur;
+    return Math.max(0, Math.min(1, v));
   }
 
   private findSat(all: SatOrbitalData[], catnum: number): SatOrbitalData | null {
@@ -223,12 +294,39 @@ export struct PassesPage {
 
   @Builder
   private headerBar() {
-    Row() {
-      Text('过境预报').fontSize(18).fontWeight(FontWeight.Bold).fontColor($r('app.color.color_text'))
-      Blank()
-      Text(`仰角>=${this.minElevation}deg · ${this.windowHours}h · ${this.trackCount}星`)
-        .fontSize(11)
-        .fontColor($r('app.color.color_text_secondary'))
+    Column({ space: 8 }) {
+      Row() {
+        Text('过境预报').fontSize(18).fontWeight(FontWeight.Bold).fontColor($r('app.color.color_text'))
+        Blank()
+        Text(`仰角>=${this.minElevation}deg · ${this.windowHours}h · ${this.trackCount}星`)
+          .fontSize(11)
+          .fontColor($r('app.color.color_text_secondary'))
+      }
+      .width('100%')
+
+      Row({ space: 6 }) {
+        Text('按卫星')
+          .fontSize(13)
+          .fontWeight(this.sortMode === PassSortMode.BY_SATELLITE ? FontWeight.Bold : FontWeight.Normal)
+          .fontColor(this.sortMode === PassSortMode.BY_SATELLITE ? '#FFFFFF' : $r('app.color.color_text_secondary'))
+          .backgroundColor(this.sortMode === PassSortMode.BY_SATELLITE ? $r('app.color.color_primary') : $r('app.color.color_card'))
+          .borderRadius(16)
+          .padding({ left: 16, right: 16, top: 5, bottom: 5 })
+          .onClick((): void => {
+            this.sortMode = PassSortMode.BY_SATELLITE
+          })
+        Text('按时间')
+          .fontSize(13)
+          .fontWeight(this.sortMode === PassSortMode.BY_TIME ? FontWeight.Bold : FontWeight.Normal)
+          .fontColor(this.sortMode === PassSortMode.BY_TIME ? '#FFFFFF' : $r('app.color.color_text_secondary'))
+          .backgroundColor(this.sortMode === PassSortMode.BY_TIME ? $r('app.color.color_primary') : $r('app.color.color_card'))
+          .borderRadius(16)
+          .padding({ left: 16, right: 16, top: 5, bottom: 5 })
+          .onClick((): void => {
+            this.sortMode = PassSortMode.BY_TIME
+          })
+      }
+      .width('100%')
     }
     .width('100%')
     .padding({ left: 14, right: 14, top: 12, bottom: 6 })
@@ -327,33 +425,45 @@ export struct PassesPage {
 
   @Builder
   private passRow(catnum: number, p: SatPassEvent, color: string) {
-    Row({ space: 10 }) {
-      Column({ space: 2 }) {
-        Text(this.dateLabel(p.aosTime))
-          .fontSize(12)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(color as ResourceColor)
-        Text(`AOS ${this.clock(p.aosTime)} → LOS ${this.clock(p.losTime)}`)
-          .fontSize(12)
-          .fontColor($r('app.color.color_text'))
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
+    Column({ space: 6 }) {
+      Row({ space: 10 }) {
+        Column({ space: 2 }) {
+          Text(this.dateLabel(p.aosTime))
+            .fontSize(12)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(color as ResourceColor)
+          Text(`AOS ${this.clock(p.aosTime)} → LOS ${this.clock(p.losTime)}`)
+            .fontSize(12)
+            .fontColor($r('app.color.color_text'))
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
 
-      Column({ space: 2 }) {
-        Text(`最高 ${p.maxElevationDeg.toFixed(0)}°`)
-          .fontSize(13)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(p.maxElevationDeg > 45 ? '#2ECC71' : color as ResourceColor)
-        Text(`时长 ${Math.round(p.durationMillis / 60000)} min`)
-          .fontSize(11)
+        Column({ space: 2 }) {
+          Text(`最高 ${p.maxElevationDeg.toFixed(0)}°`)
+            .fontSize(13)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(p.maxElevationDeg > 45 ? '#2ECC71' : color as ResourceColor)
+          Text(`时长 ${Math.round(p.durationMillis / 60000)} min`)
+            .fontSize(11)
+            .fontColor($r('app.color.color_text_secondary'))
+        }
+        .alignItems(HorizontalAlign.End)
+
+        Text('>')
+          .fontSize(18)
           .fontColor($r('app.color.color_text_secondary'))
       }
-      .alignItems(HorizontalAlign.End)
+      .width('100%')
 
-      Text('>')
-        .fontSize(18)
-        .fontColor($r('app.color.color_text_secondary'))
+      if (this.isInPass(p)) {
+        PassProgressBar({
+          nowTs: this.nowTs,
+          aosTime: p.aosTime,
+          losTime: p.losTime,
+          showLabel: true
+        })
+      }
     }
     .width('100%')
     .padding(10)
@@ -366,35 +476,47 @@ export struct PassesPage {
 
   @Builder
   private flatRow(f: FlatPass) {
-    Row({ space: 10 }) {
-      Column({ space: 2 }) {
-        Text(this.dateLabel(f.pass.aosTime))
-          .fontSize(12)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(f.color as ResourceColor)
-        Text(`${f.name}`)
-          .fontSize(12)
-          .fontColor($r('app.color.color_text'))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
+    Column({ space: 6 }) {
+      Row({ space: 10 }) {
+        Column({ space: 2 }) {
+          Text(this.dateLabel(f.pass.aosTime))
+            .fontSize(12)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(f.color as ResourceColor)
+          Text(`${f.name}`)
+            .fontSize(12)
+            .fontColor($r('app.color.color_text'))
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
 
-      Column({ space: 2 }) {
-        Text(this.clock(f.pass.aosTime))
-          .fontSize(14)
-          .fontWeight(FontWeight.Bold)
-          .fontColor($r('app.color.color_text'))
-        Text(`最高 ${f.pass.maxElevationDeg.toFixed(0)}°`)
-          .fontSize(11)
-          .fontColor(f.pass.maxElevationDeg > 45 ? '#2ECC71' : f.color as ResourceColor)
-      }
-      .alignItems(HorizontalAlign.End)
+        Column({ space: 2 }) {
+          Text(this.clock(f.pass.aosTime))
+            .fontSize(14)
+            .fontWeight(FontWeight.Bold)
+            .fontColor($r('app.color.color_text'))
+          Text(`最高 ${f.pass.maxElevationDeg.toFixed(0)}°`)
+            .fontSize(11)
+            .fontColor(f.pass.maxElevationDeg > 45 ? '#2ECC71' : f.color as ResourceColor)
+        }
+        .alignItems(HorizontalAlign.End)
 
-      Text('>')
-        .fontSize(18)
-        .fontColor($r('app.color.color_text_secondary'))
+        Text('>')
+          .fontSize(18)
+          .fontColor($r('app.color.color_text_secondary'))
+      }
+      .width('100%')
+
+      if (this.isInPass(f.pass)) {
+        PassProgressBar({
+          nowTs: this.nowTs,
+          aosTime: f.pass.aosTime,
+          losTime: f.pass.losTime,
+          showLabel: false
+        })
+      }
     }
     .width('100%')
     .padding(12)

@@ -43,7 +43,10 @@ export function solarPositionECI(julUtc: number): number[] {
  */
 export function eciToGeodetic(julUtc: number, eciPos: number[]): number[] {
   const thetaPos = Math.atan2(eciPos[1], eciPos[0]);
-  const lon = mod2PI(thetaPos - thetaGJD(julUtc));
+  let lon = mod2PI(thetaPos - thetaGJD(julUtc));
+  if (lon > Math.PI) {
+    lon -= TWO_PI;
+  }
   const r = Math.sqrt(eciPos[0] * eciPos[0] + eciPos[1] * eciPos[1]);
   const e2 = FLAT_FACT * (2.0 - FLAT_FACT);
   let lat = Math.atan2(eciPos[2], r);

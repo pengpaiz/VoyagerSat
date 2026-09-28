@@ -41,11 +41,11 @@ export class SatOrbitalPos {
   }
 
   getDownlinkFreq(freq: number): number {
-    return Math.round(freq * (SPEED_OF_LIGHT - this.distanceRate * 1000.0) / SPEED_OF_LIGHT);
+    return Math.trunc(freq * (SPEED_OF_LIGHT - this.distanceRate * 1000.0) / SPEED_OF_LIGHT);
   }
 
   getUplinkFreq(freq: number): number {
-    return Math.round(freq * (SPEED_OF_LIGHT + this.distanceRate * 1000.0) / SPEED_OF_LIGHT);
+    return Math.trunc(freq * (SPEED_OF_LIGHT + this.distanceRate * 1000.0) / SPEED_OF_LIGHT);
   }
 
   getOrbitalVelocity(): number {

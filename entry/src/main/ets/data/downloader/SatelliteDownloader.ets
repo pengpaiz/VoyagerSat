@@ -57,6 +57,34 @@ export class SatelliteDownloader {
     return new SatelliteDownloadResult(list);
   }
 
+  /** Multi-source download: try mirror first, then Celestrak fallback. */
+  async downloadWithFallback(): Promise<SatelliteDownloadResult> {
+    const sources: string[] = [CN_TLE_URL, CELESTRAK_TLE_URL];
+    let lastError: Error | null = null;
+    for (let i = 0; i < sources.length; i++) {
+      try {
+        const result = await this.downloadFromMirror(sources[i]);
+        if (result.count > 0) {
+          return result;
+        }
+        lastError = new Error(`empty result: ${sources[i]}`);
+      } catch (e) {
+        lastError = e instanceof Error ? e : new Error(String(e));
+      }
+    }
+    throw lastError !== null ? lastError : new Error('all sources failed');
+  }
+
+  /** Parse a local TLE text snapshot (e.g. bundled in rawfile). */
+  parseTLEText(text: string): SatelliteDownloadResult {
+    return new SatelliteDownloadResult(this.parser.parseTLEStream(text));
+  }
+
+  /** Parse a local transponder JSON text snapshot. */
+  parseTransponderText(text: string): TransponderDownloadResult {
+    return new TransponderDownloadResult(this.parser.parseTransponderJSON(text));
+  }
+
   /** Download transponder data from the domestic accelerated mirror (trans.json). */
   async downloadTransponders(url: string = CN_TRANSPONDER_URL): Promise<TransponderDownloadResult> {
     const text = await this.fetchText(url);
@@ -83,7 +111,7 @@ export class SatelliteDownloader {
       httpRequest.request(url, {
         method: http.RequestMethod.GET,
         connectTimeout: 20000,
-        readTimeout: 30000,
+        readTimeout: 60000,
         header: { 'Accept': '*/*', 'User-Agent': 'Look4Sat-Harmony/1.0' }
       }, (err: BusinessError, data: http.HttpResponse) => {
         httpRequest.destroy();

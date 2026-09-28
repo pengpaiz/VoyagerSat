@@ -219,6 +219,9 @@ export abstract class SatOrbitalObject {
   private calculateLatLonAlt(time: number): void {
     this.orbitalPos.theta = Math.atan2(this.position.y, this.position.x);
     this.orbitalPos.longitude = mod2PI(this.orbitalPos.theta - thetaGJD(time));
+    if (this.orbitalPos.longitude > PI) {
+      this.orbitalPos.longitude -= TWO_PI;
+    }
     const r = Math.sqrt(this.sqr(this.position.x) + this.sqr(this.position.y));
     const e2 = FLAT_FACT * (2.0 - FLAT_FACT);
     this.orbitalPos.latitude = Math.atan2(this.position.z, r);

@@ -105,6 +105,7 @@ export struct SettingsPage {
           this.sectionStation()
           this.sectionForecast()
           this.currentSummary()
+          this.sectionAbout()
         }
         .width('100%')
         .padding({ left: 16, right: 16, bottom: 16 })
@@ -373,6 +374,16 @@ export struct SettingsPage {
         .textAlign(TextAlign.Center)
     }
     .width('100%')
+  }
+
+  @Builder
+  private sectionAbout() {
+    Text('业余卫星跟踪/过境预报，算法源自 Look4Sat（GPL-3.0）')
+      .fontSize(11)
+      .fontColor($r('app.color.color_text_secondary'))
+      .width('100%')
+      .textAlign(TextAlign.Center)
+      .padding({ top: 4 })
   }
 
   private qthLabel(): string {

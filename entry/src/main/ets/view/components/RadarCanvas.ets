@@ -13,6 +13,7 @@ const TICK_MS = 33;
 const PULSE_STEP = 0.033;
 const TRACK_RED = '#E74C3C';
 const AIM_COLOR = '#0A59F7';
+const LIVE_COLOR = '#F5C518';
 const DIR_LABEL_DIST = 1.02;
 const LABEL_COLOR = '#E67E22';
 
@@ -21,7 +22,7 @@ export struct RadarCanvas {
   @Prop azimuthDeg: number = 0;
   @Prop elevationDeg: number = 0;
   @Prop track: RadarTrackResult = new RadarTrackResult([], [], []);
-  @Prop trackColor: string = '#0A59F7';
+  @Prop trackColor: string = '#E67E22';
   @Prop eclipsed: boolean = false;
   @Prop sunAzDeg: number = -999;
   @Prop sunElevDeg: number = -999;
@@ -29,6 +30,8 @@ export struct RadarCanvas {
   @Prop moonElevDeg: number = -999;
   @Prop headingAzDeg: number = 0;
   @Prop headingTiltDeg: number = 0;
+  @Prop liveAzDeg: number = -999;
+  @Prop liveElevDeg: number = -999;
   private settings: RenderingContextSettings = new RenderingContextSettings(true);
   private ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.settings);
   private lastW: number = 0;
@@ -92,6 +95,7 @@ export struct RadarCanvas {
     this.drawCompassLabels(ctx, radius);
     this.drawTrack(ctx, radius);
     this.drawSatellite(ctx, radius);
+    this.drawLivePos(ctx, radius);
     this.drawBody(ctx, radius, this.sunAzDeg, this.sunElevDeg, '#F5A623');
     this.drawBody(ctx, radius, this.moonAzDeg, this.moonElevDeg, '#8F9BA8');
     this.drawAim(ctx, radius);
@@ -257,6 +261,27 @@ export struct RadarCanvas {
       ctx.arc(pt.x, pt.y, glowRadius, 0, Math.PI * 2);
       ctx.stroke();
     }
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  private drawLivePos(ctx: CanvasRenderingContext2D, radius: number): void {
+    if (this.liveElevDeg <= 0 || this.liveAzDeg < -900) {
+      return;
+    }
+    const pt = sph2CartDeg(this.liveAzDeg, this.liveElevDeg, radius);
+    ctx.save();
+    ctx.fillStyle = LIVE_COLOR;
+    ctx.strokeStyle = LIVE_COLOR;
+    ctx.lineWidth = 2.5;
+    ctx.globalAlpha = 0.35;
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, 12 + 6 * this.pulse, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, 6, 0, Math.PI * 2);
+    ctx.fill();
     ctx.restore();
     ctx.globalAlpha = 1;
   }

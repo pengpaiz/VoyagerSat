@@ -27,6 +27,18 @@
     {
       "name": "color_divider",
       "value": "#EAECF0"
+    },
+    {
+      "name": "color_tab_bar",
+      "value": "#FCFDFF"
+    },
+    {
+      "name": "color_panel_radar",
+      "value": "#E8EEF8"
+    },
+    {
+      "name": "color_panel_data",
+      "value": "#F9FAFC"
     }
   ]
 }
