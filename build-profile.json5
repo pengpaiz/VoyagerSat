@@ -5,39 +5,13 @@
         "name": "default",
         "type": "HarmonyOS",
         "material": {
-          "certpath": "C:/Users/pengp/.ohos/config/default_look_82p2_GWVzwwbstwvB1kvzG676R0jKfNuSuyStlIcH8k=.cer",
-          "keyAlias": "debugKey",
-          "keyPassword": "0000001B4C101862B2D3C77451B31CE5770D272D328D3F056C5572637ACC135F8654251399F79274628BC3",
-          "profile": "C:/Users/pengp/.ohos/config/default_look_82p2_GWVzwwbstwvB1kvzG676R0jKfNuSuyStlIcH8k=.p7b",
+          "certpath": "D:/helpto/key/dfh.cer",
+          "keyAlias": "dfh",
+          "keyPassword": "00000019B9B353304E9A81D5B7038F625E034A12F9CED39A7D2C48663854AFE51710A39FBCE98B2C88",
+          "profile": "D:/helpto/key/dfhRelease.p7b",
           "signAlg": "SHA256withECDSA",
-          "storeFile": "C:/Users/pengp/.ohos/config/default_look_82p2_GWVzwwbstwvB1kvzG676R0jKfNuSuyStlIcH8k=.p12",
-          "storePassword": "0000001B730220F3FFCBE350679DEBAFAF2EFF8D0770E3116A3C539BAF5F69BBFF3B45CDD5163C2C24C066"
-        }
-      },
-      {
-        "name": "release",
-        "type": "HarmonyOS",
-        "material": {
-          "certpath": "C:/Users/pengp/Desktop/1/AppGallery Connect.cer",
-          "keyAlias": "dfh.tys.app",
-          "keyPassword": "0000001BDA3198F86C3755084BD03B2230C3305EB7CD181056266ECBFE3208EBB3A1487D56D5A8802B0D61",
-          "profile": "C:/Users/pengp/Desktop/1/AppGallery ConnectRelease.p7b",
-          "signAlg": "SHA256withECDSA",
-          "storeFile": "D:/dfh.tys.app.p12",
-          "storePassword": "0000001BDA3198F86C3755084BD03B2230C3305EB7CD181056266ECBFE3208EBB3A1487D56D5A8802B0D61"
-        }
-      },
-      {
-        "name": "dfh",
-        "type": "HarmonyOS",
-        "material": {
-          "storeFile": "D:\\dfh.tys.app.p12",
-          "storePassword": "0000001B7B250E623F4C875FC6C77A82063559D574D809CDAB2C34B9765B4A1AF1FD68BD6C5CF03EEADEC0",
-          "keyAlias": "dfh.tys.app",
-          "keyPassword": "0000001B90E9306DA39940F7489666B900DA66F372BCA57752014B7DAE2908EDC00EA4E1B675DF0418875F",
-          "signAlg": "SHA256withECDSA",
-          "profile": "C:\\Users\\pengp\\Desktop\\1\\AppGallery ConnectRelease.p7b",
-          "certpath": "C:\\Users\\pengp\\Desktop\\1\\AppGallery Connect.cer"
+          "storeFile": "D:/helpto/key/dfh.p12",
+          "storePassword": "00000019A711A2AF456AE46D551FC57BB77566EAB9C7B966E0FFC22E6094E1A27716225FF55AA788F0"
         }
       }
     ],

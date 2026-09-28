@@ -6,6 +6,7 @@
 import { SatelliteApp } from '../../common/SatelliteApp';
 import { SelectedSats } from '../../common/SelectedSats';
 import { AppSettings } from '../../common/AppSettings';
+import { SAT_COLORS } from '../../common/SatColors';
 import { SatOrbitalData } from '../../domain/predict/OrbitalData';
 import { createOrbitalObject } from '../../domain/predict/OrbitalFactory';
 import { SatPassEvent, SatPassFinder } from '../../domain/predict/SatPassFinder';
@@ -45,11 +46,13 @@ class CalCell {
 class CalPass {
   catnum: number;
   name: string;
+  color: string;
   pass: SatPassEvent;
 
-  constructor(catnum: number, name: string, pass: SatPassEvent) {
+  constructor(catnum: number, name: string, color: string, pass: SatPassEvent) {
     this.catnum = catnum;
     this.name = name;
+    this.color = color;
     this.pass = pass;
   }
 }
@@ -142,7 +145,7 @@ export struct CalendarPage {
           list = [];
           this.passesByDay.set(key, list);
         }
-        list.push(new CalPass(used[i], satData.name, p));
+        list.push(new CalPass(used[i], satData.name, SAT_COLORS[i % SAT_COLORS.length], p));
       }
       await this.yieldFrame();
       if (seq !== this.computeSeq) {
@@ -267,6 +270,12 @@ export struct CalendarPage {
 
   private selectDay(cell: CalCell): void {
     if (!cell.inMonth) {
+      const d = new Date(cell.dateMillis);
+      this.year = d.getFullYear();
+      this.month = d.getMonth();
+      this.selectedMillis = cell.dateMillis;
+      this.rebuildCells();
+      this.applyDaySelection();
       return;
     }
     this.selectedMillis = cell.dateMillis;
@@ -436,19 +445,16 @@ export struct CalendarPage {
       ForEach(this.weeks, (week: CalCell[]) => {
         Row() {
           ForEach(week, (cell: CalCell) => {
-            Column({ space: 2 }) {
+            Column() {
               Text(String(cell.day))
                 .fontSize(13)
                 .fontWeight(cell.isToday || this.isSelected(cell) ? FontWeight.Bold : FontWeight.Normal)
                 .fontColor(this.cellTextColor(cell))
-              if (cell.inRange && cell.passCount > 0) {
-                Text(`${cell.satCount}星`)
-                  .fontSize(9)
-                  .fontColor(Color.White)
-                  .backgroundColor($r('app.color.color_primary'))
-                  .borderRadius(7)
-                  .padding({ left: 4, right: 4, top: 1, bottom: 1 })
-              }
+                .textAlign(TextAlign.Center)
+                .width(30)
+                .height(30)
+                .borderRadius(15)
+                .backgroundColor(cell.isToday ? '#40FFFFFF' : Color.Transparent)
             }
             .layoutWeight(1)
             .height(46)
@@ -521,11 +527,12 @@ export struct CalendarPage {
           Column({ space: 8 }) {
             ForEach(this.dayList, (cp: CalPass) => {
               Row({ space: 10 }) {
+                Circle({ width: 8, height: 8 }).fill(cp.color)
                 Column({ space: 2 }) {
                   Text(cp.name)
                     .fontSize(13)
                     .fontWeight(FontWeight.Medium)
-                    .fontColor($r('app.color.color_text'))
+                    .fontColor(cp.color)
                     .maxLines(1)
                     .textOverflow({ overflow: TextOverflow.Ellipsis })
                   Text(`NORAD ${cp.catnum}`)
@@ -541,7 +548,7 @@ export struct CalendarPage {
                 Text(`最高 ${cp.pass.maxElevationDeg.toFixed(0)}°`)
                   .fontSize(12)
                   .fontWeight(FontWeight.Bold)
-                  .fontColor(cp.pass.maxElevationDeg > 45 ? '#2ECC71' : $r('app.color.color_primary'))
+                  .fontColor(cp.pass.maxElevationDeg > 45 ? '#2ECC71' : cp.color)
               }
               .width('100%')
               .padding(10)

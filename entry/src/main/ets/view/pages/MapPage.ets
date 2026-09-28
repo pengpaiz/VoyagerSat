@@ -453,9 +453,6 @@ export struct MapPage {
       ctx.fill();
       if (selected) {
         ctx.stroke();
-        ctx.font = '11px sans-serif';
-        ctx.fillStyle = '#FFFFFF';
-        ctx.fillText(`${sat.name} ${this.fmtLat(lat)} ${this.fmtLon(this.relLon(lon))}`, x + 9, y - 7);
       }
       ctx.restore();
     }

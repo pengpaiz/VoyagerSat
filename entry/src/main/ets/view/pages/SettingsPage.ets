@@ -15,7 +15,7 @@ export struct SettingsPage {
   @State customSelected: boolean = false;
   @State satCount: number = 0;
   @State transCount: number = 0;
-  @StorageLink('settings_min_elevation') minElevation: number = 5;
+  @State minElevation: number = 5;
   @StorageLink('settings_window_hours') windowHours: number = 24;
   private wasLoaded: boolean = false;
   private app: SatelliteApp = SatelliteApp.getInstance();
@@ -30,6 +30,7 @@ export struct SettingsPage {
     this.lonText = station.longitude.toFixed(4);
     this.altText = station.altitude.toFixed(0);
     this.qthText = positionToQth(station.latitude, station.longitude) ?? '';
+    this.minElevation = AppSettings.getMinElevation();
     this.refreshCounts();
   }
 
@@ -83,8 +84,11 @@ export struct SettingsPage {
     promptAction.showToast({ message: '站址已保存' });
   }
 
-  private onMinElevationChange(v: number): void {
+  private onMinElevationChange(v: number, mode: SliderChangeMode): void {
     this.minElevation = Math.round(v);
+    if (mode === SliderChangeMode.End) {
+      AppSettings.setMinElevation(this.minElevation);
+    }
   }
 
   private onWindowChange(v: number): void {
@@ -275,8 +279,8 @@ export struct SettingsPage {
         style: SliderStyle.OutSet
       })
         .width('100%')
-        .onChange((value: number): void => {
-          this.onMinElevationChange(value)
+        .onChange((value: number, mode: SliderChangeMode): void => {
+          this.onMinElevationChange(value, mode)
         })
 
       Divider().color($r('app.color.color_divider'))
