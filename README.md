@@ -27,5 +27,6 @@ Look4Sat - Copyright (C) 2019-2026 Arty Bishop and contributors.
 
 免责声明
 本应用为基于 Look4Sat 的非官方/独立 HarmonyOS 移植版，不是官方 Look4Sat 发布，与原始 Look4Sat 项目无关联，也未获其认可或背书。
+修改日期：2026.9.28
 
 73！📡
