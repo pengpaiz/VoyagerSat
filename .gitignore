@@ -1,0 +1,5 @@
+*.p12
+*.pfx
+*.jks
+*.keystore
+build-profile.local.json5
