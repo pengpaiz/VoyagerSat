@@ -2,4 +2,6 @@
 *.pfx
 *.jks
 *.keystore
+*.cer
+*.p7b
 build-profile.local.json5
