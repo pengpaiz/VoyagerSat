@@ -5,3 +5,27 @@
 *.cer
 *.p7b
 build-profile.local.json5
+     # ---- 构建产物 / IDE 缓存 ----                                                                                              $0.97 spent                             
+     /node_modules                                                                                                                                                        
+     /oh_modules                                                                                                                  LSP                                     
+     /local.properties                                                                                                            LSPs are disabled                       
+     /.idea                                                                                                                                                               
+     **/build                                                                                                                                                             
+     /.hvigor                                                                                                                                                             
+     .cxx                                                                                                                                                                 
+     /.clangd                                                                                                                                                             
+     /.clang-format                                                                                                                                                       
+     /.clang-tidy                                                                                                                                                         
+     **/.test                                                                                                                                                             
+     /.appanalyzer                                                                                                                                                        
+     /.preview                                                                                                                                                            
+                                                                                                                                                                          
+     # ---- 签名材料：绝不入库 ----                                                                                                                                       
+     *.p12                                                                                                                                                                
+     *.pfx                                                                                                                                                                
+     *.jks                                                                                                                                                                
+     *.keystore                                                                                                                                                           
+     *.cer                                                                                                                                                                
+     *.p7b                                                                                                                                                                
+     build-profile.local.json5                                                                                                                                            
+                                
