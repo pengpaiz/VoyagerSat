@@ -8,10 +8,16 @@ import { SelectedSats } from '../../common/SelectedSats';
 import { AppSettings } from '../../common/AppSettings';
 import { SAT_COLORS } from '../../common/SatColors';
 import { SatOrbitalData } from '../../domain/predict/OrbitalData';
-import { createOrbitalObject } from '../../domain/predict/OrbitalFactory';
-import { SatPassEvent, SatPassFinder } from '../../domain/predict/SatPassFinder';
-import { SatOrbitalObject } from '../../domain/predict/OrbitalObject';
+import { SatPassEvent } from '../../domain/predict/SatPassFinder';
+import { CalendarForecast } from '../../domain/predict/CalendarForecast';
+import { TAB_BAR_CLEARANCE } from '../../common/LayoutMetrics';
+import { ENTER_SCALE, PRESS_IN_MS, PRESS_OUT_MS, PRESS_SCALE } from '../components/PressFx';
 
+const TAB_CALENDAR = 3;
+/** 切到日历页后延后多久开始重算（让入场动画先跑完，避免抢主线程） */
+const CALC_START_DELAY_MS = 360;
+/** 每算完一颗星让出多久：给渲染一帧的时间，保证滚动/动画不卡 */
+const CALC_YIELD_MS = 16;
 const FORECAST_DAYS = 14;
 const MAX_CALC_SATS = 20;
 const DAY_MS = 86400000;
@@ -72,25 +78,73 @@ export struct CalendarPage {
   @StorageLink('settings_min_elevation') @Watch('recompute') minElevation: number = 5;
   @StorageLink('station_latitude') @Watch('recompute') stationLat: number = 48.2;
   @StorageLink('station_longitude') @Watch('recompute') stationLon: number = 16.37;
+  @StorageLink('station_altitude') @Watch('recompute') stationAlt: number = 0;
+  @StorageProp('current_tab') @Watch('onTabChanged') currentTab: number = TAB_CALENDAR;
 
+  private dirty: boolean = false;
+  @State pressedBtn: string = '';
+  @State btnEntered: boolean = false;
   private app: SatelliteApp = SatelliteApp.getInstance();
-  private finder: SatPassFinder = new SatPassFinder();
   private stats: Map<number, DayStat> = new Map();
   private passesByDay: Map<number, CalPass[]> = new Map();
   private computeSeq: number = 0;
   private gridVersion: number = 0;
+  /** 已排程的计算定时器 id（-1 表示没有待执行的计算） */
+  private pendingCalcId: number = -1;
+  /** 切换月份动画：进度 0→1，方向 -1 上一月 / +1 下一月 */
+  @State gridFx: number = 1;
+  @State gridDir: number = 1;
 
   aboutToAppear(): void {
     const now = new Date();
     this.year = now.getFullYear();
     this.month = now.getMonth();
     this.selectedMillis = this.dayStart(now.getTime());
+    this.dirty = false;
     this.recompute();
   }
 
+  /** 本页不可见时只记脏标记：14 天预报很贵，切到日历页再算。 */
   recompute(): void {
-    const seq = ++this.computeSeq;
-    this.runCompute(seq);
+    if (this.currentTab !== TAB_CALENDAR) {
+      this.dirty = true;
+      return;
+    }
+    this.dirty = false;
+    this.scheduleCompute();
+  }
+
+  onTabChanged(): void {
+    if (this.currentTab === TAB_CALENDAR) {
+      if (this.dirty) {
+        this.dirty = false;
+        this.scheduleCompute();
+      }
+    } else if (this.pendingCalcId >= 0) {
+      // 还没开算就切走了：取消，避免在不可见时白算
+      clearTimeout(this.pendingCalcId);
+      this.pendingCalcId = -1;
+      this.dirty = true;
+    }
+  }
+
+  /**
+   * 延后一点再开算：切到日历页时先让入场动画跑完，避免重算和动画抢主线程导致卡顿。
+   * 已排程时不再重复排（到点后 runCompute 会重新读取最新状态）。
+   */
+  private scheduleCompute(): void {
+    if (this.pendingCalcId >= 0) {
+      return;
+    }
+    this.pendingCalcId = setTimeout((): void => {
+      this.pendingCalcId = -1;
+      if (this.currentTab !== TAB_CALENDAR) {
+        this.dirty = true;
+        return;
+      }
+      const seq = ++this.computeSeq;
+      this.runCompute(seq);
+    }, CALC_START_DELAY_MS);
   }
 
   private async runCompute(seq: number): Promise<void> {
@@ -99,62 +153,82 @@ export struct CalendarPage {
     const station = AppSettings.getStation();
     const minElev = this.minElevation;
     const now = Date.now();
-    this.stats = new Map();
-    this.passesByDay = new Map();
-    this.computing = cats.length > 0 && all.length > 0;
-    this.rebuildCells();
-    this.applyDaySelection();
+    const forecast = CalendarForecast.getInstance();
     if (cats.length === 0 || all.length === 0) {
+      forecast.prepare(this.dataVersion);
+      this.computing = false;
+      this.stats = new Map();
+      this.passesByDay = new Map();
+      this.rebuildCells();
+      this.applyDaySelection();
       return;
     }
+    // 共享缓存：启动/选星时已由后台预热过，这里通常直接命中；没命中的才补算
+    forecast.prepare(this.dataVersion);
     const used = cats.slice(0, MAX_CALC_SATS);
+    const missing: number[] = [];
     for (let i = 0; i < used.length; i++) {
-      const satData = this.findSat(all, used[i]);
+      if (!forecast.has(used[i])) {
+        missing.push(used[i]);
+      }
+    }
+    this.computing = missing.length > 0;
+    // 先用手上的缓存出图，再逐颗补算
+    this.aggregate(used, minElev);
+    for (let i = 0; i < missing.length; i++) {
+      const catnum = missing[i];
+      const satData = this.findSat(all, catnum);
       if (satData === null) {
         continue;
       }
-      let obj: SatOrbitalObject;
-      try {
-        obj = createOrbitalObject(satData);
-      } catch (e) {
+      forecast.computeOne(catnum, satData, station, now);
+      await this.yieldFrame();
+      if (seq !== this.computeSeq) {
+        return;
+      }
+      this.aggregate(used, minElev);
+    }
+    this.computing = false;
+    this.aggregate(used, minElev);
+  }
+
+  /** 把缓存里已选星的过境按当前仰角门槛汇总成每日统计与当日明细。 */
+  private aggregate(used: number[], minElev: number): void {
+    const forecast = CalendarForecast.getInstance();
+    const stats = new Map<number, DayStat>();
+    const byDay = new Map<number, CalPass[]>();
+    for (let i = 0; i < used.length; i++) {
+      if (!forecast.has(used[i])) {
         continue;
       }
-      let passes: SatPassEvent[] = [];
-      try {
-        passes = this.finder.getPasses(obj, station, now, FORECAST_DAYS * 24);
-      } catch (e) {
-        continue;
-      }
+      const passes = forecast.passesOf(used[i]);
+      const name = forecast.nameOf(used[i]);
+      const color = SAT_COLORS[i % SAT_COLORS.length];
       for (let j = 0; j < passes.length; j++) {
         const p = passes[j];
         if (p.maxElevationDeg < minElev) {
           continue;
         }
         const key = this.dayStart(p.aosTime);
-        let stat = this.stats.get(key);
+        let stat = stats.get(key);
         if (stat === undefined) {
           stat = new DayStat();
-          this.stats.set(key, stat);
+          stats.set(key, stat);
         }
         stat.passCount++;
         if (stat.satCats.indexOf(used[i]) < 0) {
           stat.satCats.push(used[i]);
         }
-        let list = this.passesByDay.get(key);
+        let list = byDay.get(key);
         if (list === undefined) {
           list = [];
-          this.passesByDay.set(key, list);
+          byDay.set(key, list);
         }
-        list.push(new CalPass(used[i], satData.name, SAT_COLORS[i % SAT_COLORS.length], p));
+        list.push(new CalPass(used[i], name, color, p));
       }
-      await this.yieldFrame();
-      if (seq !== this.computeSeq) {
-        return;
-      }
-      this.rebuildCells();
-      this.applyDaySelection();
     }
-    this.computing = false;
+    this.stats = stats;
+    this.passesByDay = byDay;
     this.rebuildCells();
     this.applyDaySelection();
   }
@@ -163,7 +237,7 @@ export struct CalendarPage {
     return new Promise<void>((resolve: () => void) => {
       setTimeout((): void => {
         resolve();
-      }, 0);
+      }, CALC_YIELD_MS);
     });
   }
 
@@ -222,6 +296,8 @@ export struct CalendarPage {
     this.fixSelectionForMonth();
     this.rebuildCells();
     this.applyDaySelection();
+    this.gridDir = -1;
+    this.playGridFx();
   }
 
   private nextMonth(): void {
@@ -236,6 +312,8 @@ export struct CalendarPage {
     this.fixSelectionForMonth();
     this.rebuildCells();
     this.applyDaySelection();
+    this.gridDir = 1;
+    this.playGridFx();
   }
 
   private canPrev(): boolean {
@@ -271,11 +349,17 @@ export struct CalendarPage {
   private selectDay(cell: CalCell): void {
     if (!cell.inMonth) {
       const d = new Date(cell.dateMillis);
-      this.year = d.getFullYear();
-      this.month = d.getMonth();
+      const targetY = d.getFullYear();
+      const targetM = d.getMonth();
+      // 点击上/下月的补位日期会跳月：按目标月相对当前月的方向播切换动画
+      const after = targetY > this.year || (targetY === this.year && targetM > this.month);
+      this.gridDir = after ? 1 : -1;
+      this.year = targetY;
+      this.month = targetM;
       this.selectedMillis = cell.dateMillis;
       this.rebuildCells();
       this.applyDaySelection();
+      this.playGridFx();
       return;
     }
     this.selectedMillis = cell.dateMillis;
@@ -351,6 +435,43 @@ export struct CalendarPage {
     return `${hh}:${mm}`;
   }
 
+  // ---- 按钮动画 ----
+
+  /**
+   * 切换月份动画：与卫星页选择动画同一套（320ms + Friction）。
+   * 先瞬回 0（duration=0 不产生动画），下一帧再动画到 1。
+   */
+  private playGridFx(): void {
+    this.getUIContext().animateTo({ duration: 0, curve: Curve.Linear }, (): void => {
+      this.gridFx = 0;
+    });
+    setTimeout((): void => {
+      this.getUIContext().animateTo({ duration: 320, curve: Curve.Friction }, (): void => {
+        this.gridFx = 1;
+      });
+    }, 0);
+  }
+
+  /** 入场：整组按钮从 0.86 回弹到 1；按压：当前按钮收到 0.9 再回弹。 */
+  private pressScale(key: string): number {
+    const base = this.btnEntered ? 1 : ENTER_SCALE;
+    return this.pressedBtn === key ? base * PRESS_SCALE : base;
+  }
+
+  private onBtnTouch(key: string, event: TouchEvent): void {
+    if (event.type === TouchType.Down) {
+      this.getUIContext().animateTo({ duration: PRESS_IN_MS, curve: Curve.Friction }, (): void => {
+        this.pressedBtn = key;
+      });
+    } else if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+      this.getUIContext().animateTo({ duration: PRESS_OUT_MS, curve: Curve.Friction }, (): void => {
+        if (this.pressedBtn === key) {
+          this.pressedBtn = '';
+        }
+      });
+    }
+  }
+
   build() {
     Column() {
       this.headerBar()
@@ -364,6 +485,11 @@ export struct CalendarPage {
     .width('100%')
     .height('100%')
     .backgroundColor($r('app.color.color_bg'))
+    .onAppear((): void => {
+      this.getUIContext().animateTo({ duration: PRESS_OUT_MS, curve: Curve.Friction }, (): void => {
+        this.btnEntered = true;
+      });
+    })
   }
 
   @Builder
@@ -379,6 +505,10 @@ export struct CalendarPage {
           .backgroundColor($r('app.color.color_primary'))
           .enabled(this.canPrev())
           .opacity(this.canPrev() ? 1 : 0.35)
+          .scale({ x: this.pressScale('cal-prev'), y: this.pressScale('cal-prev') })
+          .onTouch((event: TouchEvent): void => {
+            this.onBtnTouch('cal-prev', event);
+          })
           .onClick((): void => {
             this.prevMonth()
           })
@@ -387,6 +517,9 @@ export struct CalendarPage {
           .fontWeight(FontWeight.Bold)
           .fontColor($r('app.color.color_text'))
           .layoutWeight(1)
+          // 月份标题与网格同步按方向滑入淡入
+          .opacity(0.15 + 0.85 * this.gridFx)
+          .translate({ x: 10 * this.gridDir * (1 - this.gridFx) })
           .textAlign(TextAlign.Center)
         Button('›')
           .type(ButtonType.Circle)
@@ -397,6 +530,10 @@ export struct CalendarPage {
           .backgroundColor($r('app.color.color_primary'))
           .enabled(this.canNext())
           .opacity(this.canNext() ? 1 : 0.35)
+          .scale({ x: this.pressScale('cal-next'), y: this.pressScale('cal-next') })
+          .onTouch((event: TouchEvent): void => {
+            this.onBtnTouch('cal-next', event);
+          })
           .onClick((): void => {
             this.nextMonth()
           })
@@ -471,6 +608,9 @@ export struct CalendarPage {
     }
     .width('100%')
     .padding({ left: 8, right: 8 })
+    // 切换月份：整月网格按方向滑入 + 淡入（320ms Friction）
+    .opacity(0.15 + 0.85 * this.gridFx)
+    .translate({ x: 14 * this.gridDir * (1 - this.gridFx) })
   }
 
   private cellTextColor(cell: CalCell): ResourceColor {
@@ -516,7 +656,10 @@ export struct CalendarPage {
           .padding({ top: 20, bottom: 20 })
           .textAlign(TextAlign.Center)
       } else if (this.dayList.length === 0) {
-        Text(this.inForecast(this.selectedMillis) ? '当日暂无达标过境' : '该日期超出预报范围')
+        // 计算中先显示"正在计算"，避免误报"当日暂无达标过境"
+        Text(this.computing
+          ? '正在计算…'
+          : (this.inForecast(this.selectedMillis) ? '当日暂无达标过境' : '该日期超出预报范围'))
           .fontSize(12)
           .fontColor($r('app.color.color_text_secondary'))
           .width('100%')
@@ -548,7 +691,7 @@ export struct CalendarPage {
                 Text(`最高 ${cp.pass.maxElevationDeg.toFixed(0)}°`)
                   .fontSize(12)
                   .fontWeight(FontWeight.Bold)
-                  .fontColor(cp.pass.maxElevationDeg > 45 ? '#2ECC71' : cp.color)
+                  .fontColor(cp.color)
               }
               .width('100%')
               .padding(10)
@@ -557,6 +700,8 @@ export struct CalendarPage {
             }, (cp: CalPass): string => `${cp.catnum}-${cp.pass.aosTime}`)
           }
           .width('100%')
+          // 预留右侧滚动条宽度 + 底部给胶囊栏留空间（加在滚动内容上，页面可视区仍铺到底）
+          .padding({ right: 8, bottom: TAB_BAR_CLEARANCE })
         }
         .layoutWeight(1)
         .width('100%')
@@ -567,6 +712,7 @@ export struct CalendarPage {
     }
     .layoutWeight(1)
     .width('100%')
+    // 不再给这里加底部 padding：padding 会缩小可视区导致底部空一条，改为放在 Scroll 内容里
     .padding({ left: 14, right: 14, top: 4, bottom: 8 })
     .alignItems(HorizontalAlign.Start)
   }

@@ -24,10 +24,6 @@ export struct RadarCanvas {
   @Prop track: RadarTrackResult = new RadarTrackResult([], [], []);
   @Prop trackColor: string = '#E67E22';
   @Prop eclipsed: boolean = false;
-  @Prop sunAzDeg: number = -999;
-  @Prop sunElevDeg: number = -999;
-  @Prop moonAzDeg: number = -999;
-  @Prop moonElevDeg: number = -999;
   @Prop headingAzDeg: number = 0;
   @Prop headingTiltDeg: number = 0;
   @Prop liveAzDeg: number = -999;
@@ -82,7 +78,8 @@ export struct RadarCanvas {
   private renderCanvas(width: number, height: number): void {
     const ctx = this.ctx;
     ctx.clearRect(0, 0, width, height);
-    const radius = Math.min(width, height) / 2 * 0.95;
+    // 留出画布边缘的余量，否则 N/E/S/W 罗盘文字会被画布裁掉
+    const radius = Math.min(width, height) / 2 * 0.85;
 
     ctx.save();
     ctx.translate(width / 2, height / 2);
@@ -92,13 +89,15 @@ export struct RadarCanvas {
     this.drawSweep(ctx, radius, this.sweepDeg);
     this.drawRings(ctx, radius);
     this.drawElevationLabels(ctx, radius);
-    this.drawCompassLabels(ctx, radius);
     this.drawTrack(ctx, radius);
     this.drawSatellite(ctx, radius);
     this.drawLivePos(ctx, radius);
-    this.drawBody(ctx, radius, this.sunAzDeg, this.sunElevDeg, '#F5A623');
-    this.drawBody(ctx, radius, this.moonAzDeg, this.moonElevDeg, '#8F9BA8');
     this.drawAim(ctx, radius);
+    ctx.restore();
+    // 罗盘文字画在裁剪区域之外，避免被圆裁剪
+    ctx.save();
+    ctx.translate(width / 2, height / 2);
+    this.drawCompassLabels(ctx, radius);
     ctx.restore();
   }
 
@@ -130,7 +129,8 @@ export struct RadarCanvas {
       const ringRadius = radius - step * i;
       ctx.fillText(`${i * 30}°`, 0, -ringRadius - 6);
     }
-    ctx.fillText('90°', 0, -6);
+    // 天顶标签偏离正中心，避免高仰角时被卫星/瞄准标记覆盖
+    ctx.fillText('90°', -radius * 0.14, -radius * 0.08);
   }
 
   private drawCompassLabels(ctx: CanvasRenderingContext2D, radius: number): void {
@@ -138,10 +138,12 @@ export struct RadarCanvas {
     ctx.fillStyle = LABEL_COLOR;
     ctx.font = '12vp sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('N', 0, -r + 4);
-    ctx.fillText('E', r, 4);
-    ctx.fillText('S', 0, r + 12);
-    ctx.fillText('W', -r, 4);
+    ctx.textBaseline = 'middle';
+    ctx.fillText('N', 0, -r);
+    ctx.fillText('E', r, 0);
+    ctx.fillText('S', 0, r);
+    ctx.fillText('W', -r, 0);
+    ctx.textBaseline = 'alphabetic';
   }
 
   private drawSweep(ctx: CanvasRenderingContext2D, radius: number, deg: number): void {
@@ -282,27 +284,6 @@ export struct RadarCanvas {
     ctx.beginPath();
     ctx.arc(pt.x, pt.y, 6, 0, Math.PI * 2);
     ctx.fill();
-    ctx.restore();
-    ctx.globalAlpha = 1;
-  }
-
-  private drawBody(ctx: CanvasRenderingContext2D, radius: number, azDeg: number, elevDeg: number,
-                   color: string): void {
-    if (elevDeg <= 0 || azDeg < -900) {
-      return;
-    }
-    const pt = sph2CartDeg(azDeg, elevDeg, radius);
-    ctx.save();
-    ctx.fillStyle = color;
-    ctx.globalAlpha = 0.9;
-    ctx.beginPath();
-    ctx.arc(pt.x, pt.y, 5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 0.35;
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.arc(pt.x, pt.y, 9, 0, Math.PI * 2);
-    ctx.stroke();
     ctx.restore();
     ctx.globalAlpha = 1;
   }

@@ -2,13 +2,17 @@ import { SatelliteApp } from '../../common/SatelliteApp';
 import { SelectedSats } from '../../common/SelectedSats';
 import { AppSettings, PassSortMode } from '../../common/AppSettings';
 import { SAT_COLORS } from '../../common/SatColors';
-import { SatOrbitalData } from '../../domain/predict/OrbitalData';
-import { createOrbitalObject } from '../../domain/predict/OrbitalFactory';
-import { SatPassEvent, SatPassFinder } from '../../domain/predict/SatPassFinder';
+import { SatPassEvent } from '../../domain/predict/SatPassFinder';
+import { PassCache } from '../../domain/predict/PassCache';
 import { PassDetailSheet, PassDetailPayload } from '../components/PassDetailSheet';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { TAB_BAR_CLEARANCE } from '../../common/LayoutMetrics';
 
-const MAX_WINDOW_H = 48;
+const TAB_PASSES = 2;
+/** 切到过境页/启动后延后多久开算（先让首屏与入场动画跑完） */
+const PASS_START_DELAY_MS = 200;
+/** 每补算一颗星让出多久：给渲染留帧，选星多时也不会长阻塞 */
+const PASS_YIELD_MS = 24;
 const NOW_REFRESH_MS = 1000;
 
 class PassSat {
@@ -83,21 +87,31 @@ export struct PassesPage {
   @StorageLink('settings_window_hours') @Watch('recompute') windowHours: number = 24;
   @StorageLink('settings_min_elevation') @Watch('recompute') minElevation: number = 5;
   @StorageLink('settings_pass_sort') @Watch('recompute') sortMode: number = PassSortMode.BY_SATELLITE;
+  @StorageLink('station_latitude') @Watch('recompute') stationLat: number = 48.2;
+  @StorageLink('station_longitude') @Watch('recompute') stationLon: number = 16.37;
+  @StorageLink('station_altitude') @Watch('recompute') stationAlt: number = 0;
+  @StorageProp('current_tab') @Watch('onTabChanged') currentTab: number = TAB_PASSES;
 
   @State showDetail: boolean = false;
   @State detailPayload: PassDetailPayload = new PassDetailPayload();
   @State detailOpenSeq: number = 0;
   @State trackCount: number = 0;
   @State nowTs: number = Date.now();
+  @State nextPass: FlatPass | null = null;
 
+  private dirty: boolean = false;
   private app: SatelliteApp = SatelliteApp.getInstance();
-  private finder: SatPassFinder = new SatPassFinder();
   private nowTimerId: number = -1;
+  /** 已排程的重算定时器 / 计算序号（用于作废过期计算） */
+  private pendingCalcId: number = -1;
+  private computeSeq: number = 0;
 
   aboutToAppear(): void {
-    this.recompute();
+    this.dirty = false;
+    this.scheduleCompute();
     this.nowTimerId = setInterval((): void => {
       this.nowTs = Date.now();
+      this.refreshNextPass();
     }, NOW_REFRESH_MS);
   }
 
@@ -106,32 +120,108 @@ export struct PassesPage {
       clearInterval(this.nowTimerId);
       this.nowTimerId = -1;
     }
+    if (this.pendingCalcId >= 0) {
+      clearTimeout(this.pendingCalcId);
+      this.pendingCalcId = -1;
+    }
   }
 
+  /** 本页不可见时只记脏标记，避免在卫星页点开关就同步跑全量过境预报。 */
   recompute(): void {
+    if (this.currentTab !== TAB_PASSES) {
+      this.dirty = true;
+      return;
+    }
+    this.dirty = false;
+    this.scheduleCompute();
+  }
+
+  onTabChanged(): void {
+    if (this.currentTab === TAB_PASSES) {
+      if (this.dirty) {
+        this.dirty = false;
+        this.scheduleCompute();
+      }
+    } else if (this.pendingCalcId >= 0) {
+      // 还没开算就切走了：取消，避免在不可见时白算
+      clearTimeout(this.pendingCalcId);
+      this.pendingCalcId = -1;
+      this.dirty = true;
+    }
+  }
+
+  /**
+   * 延后一点再开算：启动/切页时先让首屏与入场动画跑完，避免重算抢占主线程。
+   * 已排程时不重复排（到点后 doRecompute 会重新读取最新状态）。
+   */
+  private scheduleCompute(): void {
+    if (this.pendingCalcId >= 0) {
+      return;
+    }
+    this.pendingCalcId = setTimeout((): void => {
+      this.pendingCalcId = -1;
+      if (this.currentTab !== TAB_PASSES) {
+        this.dirty = true;
+        return;
+      }
+      const seq = ++this.computeSeq;
+      this.doRecompute(seq);
+    }, PASS_START_DELAY_MS);
+  }
+
+  /**
+   * 重算：命中缓存的星直接用，只有没缓存的才逐颗补算并让帧。
+   * 选的星多时不会一次性长阻塞，列表会逐步补齐。
+   */
+  private async doRecompute(seq: number): Promise<void> {
     const cats = SelectedSats.getCats();
     this.trackCount = cats.length;
     this.nowTs = Date.now();
+    const cache = PassCache.getInstance();
     if (cats.length === 0) {
       this.groups = [];
       this.flatPasses = [];
+      this.refreshNextPass();
       return;
     }
     const store = this.app.getStore();
     const station = AppSettings.getStation();
-    const allCats = store.getAll();
+    cache.prepare(this.dataVersion);
+    // 先用已有缓存渲染一版（切页/改窗口/改排序基本瞬时）
+    this.publishGroups(cats, cache);
+    for (let i = 0; i < cats.length; i++) {
+      if (seq !== this.computeSeq) {
+        return;
+      }
+      const cat = cats[i];
+      if (cache.has(cat)) {
+        continue;
+      }
+      const satData = store.getByCatnum(cat);
+      if (satData === null) {
+        cache.markMissing(cat);
+        continue;
+      }
+      cache.computeOne(cat, satData, station, this.nowTs);
+      await PassesPage.yieldFrame();
+      if (seq !== this.computeSeq) {
+        return;
+      }
+      this.publishGroups(cats, cache);
+    }
+    this.refreshNextPass();
+  }
+
+  /** 把缓存结果整理成列表数据（按当前排序方式）。 */
+  private publishGroups(cats: number[], cache: PassCache): void {
     const satList: PassSat[] = [];
     for (let i = 0; i < cats.length; i++) {
       const cat = cats[i];
-      const satData = this.findSat(allCats, cat);
-      if (satData === null) {
+      if (!cache.has(cat)) {
         continue;
       }
-      const obj = createOrbitalObject(satData);
-      const passes = this.finder.getPasses(obj, station, this.nowTs, MAX_WINDOW_H);
-      satList.push(new PassSat(cat, satData.name, SAT_COLORS[i % SAT_COLORS.length], passes));
+      satList.push(new PassSat(cat, cache.nameOf(cat), SAT_COLORS[i % SAT_COLORS.length], cache.passesOf(cat)));
     }
-
     if (this.sortMode === PassSortMode.BY_SATELLITE) {
       satList.sort((a: PassSat, b: PassSat): number => a.name.localeCompare(b.name));
       this.groups = satList;
@@ -155,6 +245,59 @@ export struct PassesPage {
       this.flatPasses = flat;
       this.groups = [];
     }
+    this.refreshNextPass();
+  }
+
+  /** 让帧：把主线程还给渲染，避免连续补算造成卡顿。 */
+  private static yieldFrame(): Promise<void> {
+    return new Promise<void>((resolve: () => void) => {
+      setTimeout((): void => {
+        resolve();
+      }, PASS_YIELD_MS);
+    });
+  }
+
+  /** 找出距离现在最近的一次未开始过境，用于头部倒计时。 */
+  private refreshNextPass(): void {
+    const limit = this.nowTs + this.windowHours * 3600000;
+    let best: FlatPass | null = null;
+    if (this.flatPasses.length > 0) {
+      for (let i = 0; i < this.flatPasses.length; i++) {
+        const f = this.flatPasses[i];
+        if (f.pass.aosTime > this.nowTs && f.pass.aosTime < limit &&
+          f.pass.maxElevationDeg >= this.minElevation &&
+          (best === null || f.pass.aosTime < best.pass.aosTime)) {
+          best = f;
+        }
+      }
+    } else {
+      for (let i = 0; i < this.groups.length; i++) {
+        const g = this.groups[i];
+        for (let j = 0; j < g.passes.length; j++) {
+          const p = g.passes[j];
+          if (p.aosTime > this.nowTs && p.aosTime < limit &&
+            p.maxElevationDeg >= this.minElevation &&
+            (best === null || p.aosTime < best.pass.aosTime)) {
+            best = new FlatPass(g.catnum, g.name, g.color, p);
+          }
+        }
+      }
+    }
+    this.nextPass = best;
+  }
+
+  private countdownText(aos: number): string {
+    const totalSec = Math.floor(Math.max(0, aos - this.nowTs) / 1000);
+    const h = Math.floor(totalSec / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+    if (h > 0) {
+      return `${h}小时${m}分`;
+    }
+    if (m > 0) {
+      return `${m}分${s.toString().padStart(2, '0')}秒`;
+    }
+    return `${s}秒`;
   }
 
   /** 距离过境时间的远近：正在过境=0，否则为距 AOS 的毫秒数。 */
@@ -169,6 +312,16 @@ export struct PassesPage {
     return this.nowTs >= p.aosTime && this.nowTs <= p.losTime;
   }
 
+  /** 该卫星当前是否有正在进行的过境（用于列表行/卡片突出显示）。 */
+  private satInPass(passes: SatPassEvent[]): boolean {
+    for (let i = 0; i < passes.length; i++) {
+      if (this.isInPass(passes[i])) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private passProgress(p: SatPassEvent): number {
     if (!this.isInPass(p)) {
       return 0;
@@ -176,15 +329,6 @@ export struct PassesPage {
     const dur = Math.max(1, p.losTime - p.aosTime);
     const v = (this.nowTs - p.aosTime) / dur;
     return Math.max(0, Math.min(1, v));
-  }
-
-  private findSat(all: SatOrbitalData[], catnum: number): SatOrbitalData | null {
-    for (let i = 0; i < all.length; i++) {
-      if (all[i].catnum === catnum) {
-        return all[i];
-      }
-    }
-    return null;
   }
 
   private openDetail(catnum: number, pass: SatPassEvent, color: string): void {
@@ -246,8 +390,11 @@ export struct PassesPage {
         } else {
           this.flatTimeView()
         }
-      } else {
+      } else if (this.app.hasStoreLoaded()) {
         this.emptyView()
+      } else {
+        // 本地数据还在加载：显示加载态，避免闪一下"暂无过境数据"
+        this.loadingView()
       }
     }
     .width('100%')
@@ -313,7 +460,10 @@ export struct PassesPage {
           .borderRadius(16)
           .padding({ left: 16, right: 16, top: 5, bottom: 5 })
           .onClick((): void => {
-            this.sortMode = PassSortMode.BY_SATELLITE
+            // 切换排列方式：胶囊着色的过渡 + 列表交叉转场都在同一动画里
+            this.getUIContext().animateTo({ duration: 320, curve: Curve.Friction }, (): void => {
+              this.sortMode = PassSortMode.BY_SATELLITE
+            });
           })
         Text('按时间')
           .fontSize(13)
@@ -323,13 +473,83 @@ export struct PassesPage {
           .borderRadius(16)
           .padding({ left: 16, right: 16, top: 5, bottom: 5 })
           .onClick((): void => {
-            this.sortMode = PassSortMode.BY_TIME
+            this.getUIContext().animateTo({ duration: 320, curve: Curve.Friction }, (): void => {
+              this.sortMode = PassSortMode.BY_TIME
+            });
           })
       }
       .width('100%')
+
+      if (this.nextPass !== null) {
+        Column({ space: 5 }) {
+          Row({ space: 8 }) {
+            Circle({ width: 8, height: 8 }).fill(this.nextPass.color)
+            Text('下次过境')
+              .fontSize(11)
+              .fontColor($r('app.color.color_text_secondary'))
+            Text(this.nextPass.name)
+              .fontSize(12)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.nextPass.color as ResourceColor)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .layoutWeight(1)
+            Text(this.countdownText(this.nextPass.pass.aosTime))
+              .fontSize(12)
+              .fontWeight(FontWeight.Bold)
+              .fontColor($r('app.color.color_primary'))
+          }
+          .width('100%')
+
+          // 更详细的信息：起止时刻 + 各自方位角、最高仰角、时长、卫星高度
+          Row({ space: 12 }) {
+            Text(`AOS ${this.clock(this.nextPass.pass.aosTime)} · 方位 ${this.nextPass.pass.aosAzimuth.toFixed(0)}°`)
+              .fontSize(11)
+              .fontColor($r('app.color.color_text_secondary'))
+            Text(`LOS ${this.clock(this.nextPass.pass.losTime)} · 方位 ${this.nextPass.pass.losAzimuth.toFixed(0)}°`)
+              .fontSize(11)
+              .fontColor($r('app.color.color_text_secondary'))
+          }
+          .width('100%')
+
+          Row({ space: 12 }) {
+            Text(`最高仰角 ${this.nextPass.pass.maxElevationDeg.toFixed(0)}°`)
+              .fontSize(11)
+              .fontColor($r('app.color.color_text'))
+            Text(`持续 ${Math.round(this.nextPass.pass.durationMillis / 60000)} min`)
+              .fontSize(11)
+              .fontColor($r('app.color.color_text_secondary'))
+            Text(`星高 ${this.nextPass.pass.altitudeKm.toFixed(0)} km`)
+              .fontSize(11)
+              .fontColor($r('app.color.color_text_secondary'))
+          }
+          .width('100%')
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+        .backgroundColor($r('app.color.color_card'))
+        .borderRadius(8)
+      }
     }
     .width('100%')
     .padding({ left: 14, right: 14, top: 12, bottom: 6 })
+  }
+
+  @Builder
+  private loadingView() {
+    Column({ space: 10 }) {
+      LoadingProgress()
+        .width(26)
+        .height(26)
+        .color($r('app.color.color_primary'))
+      Text('正在加载卫星数据…')
+        .fontSize(13)
+        .fontColor($r('app.color.color_text_secondary'))
+    }
+    .layoutWeight(1)
+    .width('100%')
+    .justifyContent(FlexAlign.Center)
   }
 
   @Builder
@@ -359,10 +579,12 @@ export struct PassesPage {
         })
       }
       .width('100%')
-      .padding(14)
+      .padding({ left: 14, right: 14, top: 14, bottom: TAB_BAR_CLEARANCE })
     }
     .layoutWeight(1)
     .width('100%')
+    // 排列方式切换：整体交叉淡入 + 上浮
+    .transition(TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: 12 })))
   }
 
   @Builder
@@ -378,10 +600,12 @@ export struct PassesPage {
         })
       }
       .width('100%')
-      .padding(14)
+      .padding({ left: 14, right: 14, top: 14, bottom: TAB_BAR_CLEARANCE })
     }
     .layoutWeight(1)
     .width('100%')
+    // 排列方式切换：整体交叉淡入 + 上浮
+    .transition(TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: 12 })))
   }
 
   @Builder
@@ -395,6 +619,17 @@ export struct PassesPage {
           .layoutWeight(1)
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
+        if (this.satInPass(g.passes)) {
+          // 正在过境：卡片标题旁给一个醒目徽标
+          Text('● 过境中')
+            .fontSize(11)
+            .fontWeight(FontWeight.Bold)
+            .fontColor($r('app.color.color_primary'))
+            .padding({ left: 6, right: 6, top: 1, bottom: 1 })
+            .borderRadius(6)
+            .borderWidth(1)
+            .borderColor($r('app.color.color_primary'))
+        }
         Text(`NORAD ${g.catnum}`)
           .fontSize(11)
           .fontColor(g.color as ResourceColor)
@@ -420,6 +655,9 @@ export struct PassesPage {
     .padding(14)
     .backgroundColor($r('app.color.color_card'))
     .borderRadius(12)
+    // 正在过境的卫星卡片描边强调
+    .borderWidth(this.satInPass(g.passes) ? 1.5 : 0)
+    .borderColor($r('app.color.color_primary'))
     .alignItems(HorizontalAlign.Start)
   }
 
@@ -443,7 +681,7 @@ export struct PassesPage {
           Text(`最高 ${p.maxElevationDeg.toFixed(0)}°`)
             .fontSize(13)
             .fontWeight(FontWeight.Bold)
-            .fontColor(p.maxElevationDeg > 45 ? '#2ECC71' : color as ResourceColor)
+            .fontColor(color as ResourceColor)
           Text(`时长 ${Math.round(p.durationMillis / 60000)} min`)
             .fontSize(11)
             .fontColor($r('app.color.color_text_secondary'))
@@ -469,6 +707,9 @@ export struct PassesPage {
     .padding(10)
     .backgroundColor($r('app.color.color_bg'))
     .borderRadius(8)
+    // 正在过境的这一条：描边 + 更亮的主色强调
+    .borderWidth(this.isInPass(p) ? 1.5 : 0)
+    .borderColor($r('app.color.color_primary'))
     .onClick((): void => {
       this.openDetail(catnum, p, color)
     })
@@ -499,7 +740,7 @@ export struct PassesPage {
             .fontColor($r('app.color.color_text'))
           Text(`最高 ${f.pass.maxElevationDeg.toFixed(0)}°`)
             .fontSize(11)
-            .fontColor(f.pass.maxElevationDeg > 45 ? '#2ECC71' : f.color as ResourceColor)
+            .fontColor(f.color as ResourceColor)
         }
         .alignItems(HorizontalAlign.End)
 
@@ -514,7 +755,7 @@ export struct PassesPage {
           nowTs: this.nowTs,
           aosTime: f.pass.aosTime,
           losTime: f.pass.losTime,
-          showLabel: false
+          showLabel: true
         })
       }
     }
@@ -522,6 +763,9 @@ export struct PassesPage {
     .padding(12)
     .backgroundColor($r('app.color.color_card'))
     .borderRadius(10)
+    // 正在过境的这一条：描边强调
+    .borderWidth(this.isInPass(f.pass) ? 1.5 : 0)
+    .borderColor($r('app.color.color_primary'))
     .onClick((): void => {
       this.openDetail(f.catnum, f.pass, f.color)
     })

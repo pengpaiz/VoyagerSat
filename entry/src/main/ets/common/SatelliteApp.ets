@@ -22,12 +22,16 @@ const RAWFILE_TRANSPONDER_SNAPSHOT = 'transponder_snapshot.json';
 
 export const ISS_CATNUM = 25544;
 
+/** 启动后延后多久再开始联网更新（避开启动头几秒的交互） */
+const STARTUP_NET_DELAY_MS = 1500;
+
 export class SatelliteApp {
   private static instanceValue: SatelliteApp | null = null;
   private store: SatelliteStore = new SatelliteStore();
   private downloader: SatelliteDownloader = new SatelliteDownloader();
   private importer: SatelliteImporter = new SatelliteImporter();
   private startupDone: boolean = false;
+  private storeLoaded: boolean = false;
   private ctx: common.Context | null = null;
 
   static getInstance(): SatelliteApp {
@@ -48,9 +52,23 @@ export class SatelliteApp {
 
   async loadFromDisk(): Promise<void> {
     await this.store.load();
+    this.storeLoaded = true;
+    // 本地数据就绪立刻通知页面重算：否则过境/日历要一直等到联网更新（已延后）才出数据
+    if (this.store.getAll().length > 0) {
+      this.bumpDataVersion();
+    }
   }
 
-  /** 启动时静默执行：静默更新数据（不提示），并尝试定位更新站址。 */
+  /** 本地数据是否已加载完成（用于区分"还没加载"与"确实没有数据"） */
+  hasStoreLoaded(): boolean {
+    return this.storeLoaded;
+  }
+
+  /**
+   * 启动时静默执行：先离线播种保证首屏有数据，
+   * 联网更新（下载+解析上万条+落盘，会长时间占用主线程）延后到 UI 稳定后再做，
+   * 否则启动头几秒里切页/滚动都会被它卡住。
+   */
   async silentStartupUpdate(): Promise<void> {
     if (this.startupDone) {
       return;
@@ -63,9 +81,16 @@ export class SatelliteApp {
         this.bumpDataVersion();
       }
     }
+    setTimeout((): void => {
+      this.startupNetworkUpdate();
+    }, STARTUP_NET_DELAY_MS);
+  }
+
+  /** 启动时的联网更新（延后执行）：卫星数据 + 转发器 + 静默定位。 */
+  private async startupNetworkUpdate(): Promise<void> {
     // 静默联网更新（国内镜像 -> Celestrak 回退），失败时保留快照数据
     try {
-      const result = await this.downloader.downloadWithFallback();
+      const result = await this.downloader.downloadWithFallback(AppSettings.getCustomTleUrl());
       this.store.replaceAll(result.dataList);
       this.store.dedupeKeepFreshest();
       await this.store.save();
@@ -74,18 +99,21 @@ export class SatelliteApp {
       // 无网络时保留本地/快照数据
     }
     try {
-      const t = await this.downloader.downloadTransponders();
+      const t = await this.downloader.downloadTransponders(AppSettings.getCustomTransponderUrl());
       this.store.setTransponders(t.transponders);
       await this.store.saveTransponders();
     } catch (e) {
       // 静默忽略转发器失败
     }
-    // 静默尝试定位（若权限允许）
-    if (this.ctx !== null) {
+    // 静默尝试定位（若权限允许，且用户没有手动设定过站址）
+    if (this.ctx !== null && !AppSettings.isStationManual()) {
       try {
         const pos = await Locator.getCurrentPosition(this.ctx);
         if (pos !== null) {
-          AppSettings.setStation(pos.latitude, pos.longitude, pos.altitude);
+          // 静默首修海拔常为 0 或粗差：不可信时保留用户已保存的海拔，避免越更新越错
+          const cur = AppSettings.getStation();
+          const alt = Locator.altitudeIsUsable(pos.altitude) ? pos.altitude : cur.altitude;
+          AppSettings.setStation(pos.latitude, pos.longitude, alt);
         }
       } catch (e) {
         // 静默忽略定位失败
@@ -96,7 +124,7 @@ export class SatelliteApp {
   async downloadAndStore(): Promise<number> {
     let dataList: SatOrbitalData[] | null = null;
     try {
-      const result = await this.downloader.downloadWithFallback();
+      const result = await this.downloader.downloadWithFallback(AppSettings.getCustomTleUrl());
       dataList = result.dataList;
     } catch (e) {
       // 所有在线源失败：无本地数据时回退内置快照，否则抛出提示
@@ -154,7 +182,7 @@ export class SatelliteApp {
 
   /** 下载转发器数据（国内加速镜像）到 store，返回条数。 */
   async downloadTranspondersAndStore(): Promise<number> {
-    const result = await this.downloader.downloadTransponders();
+    const result = await this.downloader.downloadTransponders(AppSettings.getCustomTransponderUrl());
     this.store.setTransponders(result.transponders);
     await this.store.saveTransponders();
     return result.count;

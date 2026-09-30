@@ -125,6 +125,8 @@ export abstract class SatOrbitalObject {
     this.calculateObs(this.julUTC, this.position, this.velocity, pos, this.squintVector);
     this.calculateLatLonAlt(this.julUTC);
     this.orbitalPos.time = time;
+    this.orbitalPos.eclipsed = this.isEclipsed();
+    this.orbitalPos.eclipseDepth = this.eclipseDepth;
     return this.orbitalPos;
   }
 

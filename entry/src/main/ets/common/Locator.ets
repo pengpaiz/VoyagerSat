@@ -14,14 +14,23 @@ const LOCATION_PERMISSIONS: Permissions[] = [
 
 export class Locator {
   /**
+   * 海拔是否可信。首次定位（尤其是网络辅助首修）常把海拔给成 0 或明显离谱的值，
+   * 用它覆盖用户已保存的海拔会把站址算错，所以调用方要先判断。
+   */
+  static altitudeIsUsable(alt: number): boolean {
+    return Number.isFinite(alt) && alt > -500 && alt < 9000;
+  }
+
+  /**
    * Request location permission if missing, then fetch current position.
+   * [highAccuracy] 为 true 时用高精度请求（更慢，但海拔可信）。
    * Returns null on failure / denial.
    */
-  static async getCurrentPosition(context: common.Context): Promise<SatGeoPos | null> {
+  static async getCurrentPosition(context: common.Context, highAccuracy: boolean = false): Promise<SatGeoPos | null> {
     if (!await Locator.ensurePermission(context)) {
       return null;
     }
-    return await Locator.fetch();
+    return await Locator.fetch(highAccuracy);
   }
 
   private static async ensurePermission(context: common.Context): Promise<boolean> {
@@ -39,13 +48,17 @@ export class Locator {
     }
   }
 
-  private static fetch(): Promise<SatGeoPos | null> {
+  private static fetch(highAccuracy: boolean): Promise<SatGeoPos | null> {
     return new Promise<SatGeoPos | null>((resolve) => {
       const request: geoLocationManager.CurrentLocationRequest = {
-        priority: geoLocationManager.LocationRequestPriority.FIRST_FIX,
-        scenario: geoLocationManager.LocationRequestScenario.TRAJECTORY_TRACKING,
+        priority: highAccuracy
+          ? geoLocationManager.LocationRequestPriority.ACCURACY
+          : geoLocationManager.LocationRequestPriority.FIRST_FIX,
+        scenario: highAccuracy
+          ? geoLocationManager.LocationRequestScenario.NAVIGATION
+          : geoLocationManager.LocationRequestScenario.TRAJECTORY_TRACKING,
         maxAccuracy: 0,
-        timeoutMs: 10000
+        timeoutMs: highAccuracy ? 20000 : 10000
       };
       try {
         geoLocationManager.getCurrentLocation(request, (err: BusinessError, loc: geoLocationManager.Location) => {

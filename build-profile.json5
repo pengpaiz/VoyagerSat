@@ -1,0 +1,59 @@
+/*
+ * 开源仓库配置：这里**不包含任何签名材料**（证书/私钥/口令都不入库）。
+ * 本机运行前请在 DevEco Studio 里自行配置签名：
+ *   File → Project Structure → Signing Configs → 勾选 Automatically generate signature
+ * （IDE 会把 signingConfigs 写回本文件，请勿把带口令的版本提交到仓库。）
+ */
+{
+  app: {
+    products: [
+      {
+        name: 'default',
+        targetSdkVersion: '26.0.0',
+        compatibleSdkVersion: '6.1.1(24)',
+        runtimeOS: 'HarmonyOS',
+        buildOption: {
+          strictMode: {
+            caseSensitiveCheck: true,
+            useNormalizedOHMUrl: true,
+          },
+        },
+      },
+      {
+        name: 'release',
+        targetSdkVersion: '26.0.0',
+        compatibleSdkVersion: '6.1.1(24)',
+        runtimeOS: 'HarmonyOS',
+        buildOption: {
+          strictMode: {
+            caseSensitiveCheck: true,
+            useNormalizedOHMUrl: true,
+          },
+        },
+      },
+    ],
+    buildModeSet: [
+      {
+        name: 'debug',
+      },
+      {
+        name: 'release',
+      },
+    ],
+  },
+  modules: [
+    {
+      name: 'entry',
+      srcPath: './entry',
+      targets: [
+        {
+          name: 'default',
+          applyToProducts: [
+            'default',
+            'release',
+          ],
+        },
+      ],
+    },
+  ],
+}

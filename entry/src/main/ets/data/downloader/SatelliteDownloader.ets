@@ -58,12 +58,17 @@ export class SatelliteDownloader {
   }
 
   /** Multi-source download: try mirror first, then Celestrak fallback. */
-  async downloadWithFallback(): Promise<SatelliteDownloadResult> {
-    const sources: string[] = [CN_TLE_URL, CELESTRAK_TLE_URL];
+  async downloadWithFallback(customUrl: string = ''): Promise<SatelliteDownloadResult> {
+    const sources: string[] = [];
+    if (customUrl.trim().length > 0) {
+      sources.push(customUrl.trim());
+    }
+    sources.push(CN_TLE_URL);
+    sources.push(CELESTRAK_TLE_URL);
     let lastError: Error | null = null;
     for (let i = 0; i < sources.length; i++) {
       try {
-        const result = await this.downloadFromMirror(sources[i]);
+        const result = await this.downloadAuto(sources[i]);
         if (result.count > 0) {
           return result;
         }
@@ -73,6 +78,45 @@ export class SatelliteDownloader {
       }
     }
     throw lastError !== null ? lastError : new Error('all sources failed');
+  }
+
+  /** 判断 URL 是否可下载的 HTTP(S) 地址。 */
+  static isUsableUrl(url: string): boolean {
+    const u = url.trim().toLowerCase();
+    return u.startsWith('http://') || u.startsWith('https://');
+  }
+
+  /**
+   * 自动识别格式下载：按行内含逗号判定 CSV（Celestrak FORMAT=csv），
+   * 否则按 TLE 三行解析；解析为空时再试另一种，兼容用户自建源。
+   */
+  async downloadAuto(url: string): Promise<SatelliteDownloadResult> {
+    const text = await this.fetchText(url);
+    const looksCsv = SatelliteDownloader.looksLikeCsv(text);
+    const first = looksCsv ? this.parser.parseCSVStream(text) : this.parser.parseTLEStream(text);
+    if (first.length > 0) {
+      return new SatelliteDownloadResult(first);
+    }
+    const second = looksCsv ? this.parser.parseTLEStream(text) : this.parser.parseCSVStream(text);
+    return new SatelliteDownloadResult(second);
+  }
+
+  /** 采样前若干非空行，超过半数含逗号且含字母，则认为是 CSV。 */
+  private static looksLikeCsv(text: string): boolean {
+    const lines = text.split('\n');
+    let checked = 0;
+    let comma = 0;
+    for (let i = 0; i < lines.length && checked < 5; i++) {
+      const line = lines[i].trim();
+      if (line.length === 0) {
+        continue;
+      }
+      checked++;
+      if (line.indexOf(',') >= 0) {
+        comma++;
+      }
+    }
+    return checked > 0 && comma * 2 > checked;
   }
 
   /** Parse a local TLE text snapshot (e.g. bundled in rawfile). */

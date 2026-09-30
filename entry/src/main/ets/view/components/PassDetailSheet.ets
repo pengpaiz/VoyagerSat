@@ -8,7 +8,6 @@ import { SatGeoPos } from '../../domain/predict/GeoPos';
 import { RadarCanvas } from './RadarCanvas';
 import { SatRadio } from '../../domain/model/SatRadio';
 import { buildPassTrack, RadarTrackResult } from '../../domain/predict/RadarTrack';
-import { SatCelestialComputer } from '../../domain/predict/CelestialComputer';
 import { sensor } from '@kit.SensorServiceKit';
 import { DeviceOrientation } from '../../common/DeviceOrientation';
 import { toDegrees } from '../../common/utils/MathUtils';
@@ -114,10 +113,6 @@ export class PassDetailPayload {
   durationMillis: number = 0;
   tcaPos: SatOrbitalPos = new SatOrbitalPos();
   eclipsed: boolean = false;
-  sunAzDeg: number = -999;
-  sunElevDeg: number = -999;
-  moonAzDeg: number = -999;
-  moonElevDeg: number = -999;
   track: RadarTrackResult = new RadarTrackResult([], [], []);
   freqGroups: FreqGroupView[] = [];
   hasTransponders: boolean = false;
@@ -214,12 +209,6 @@ export struct PassDetailSheet {
     const pos = obj.getFullPosition(station, tca);
     payload.tcaPos = pos;
     payload.eclipsed = pos.eclipsed;
-    const sun = SatCelestialComputer.getSunPosition(station, tca);
-    payload.sunAzDeg = degRad(sun.azimuth);
-    payload.sunElevDeg = degRad(sun.elevation);
-    const moon = SatCelestialComputer.getMoonPosition(station, tca);
-    payload.moonAzDeg = degRad(moon.azimuth);
-    payload.moonElevDeg = degRad(moon.elevation);
     payload.track = buildPassTrack(obj, station, pass, 1, 60);
 
     // 转发器（按模式分组，原始频率）
@@ -384,10 +373,6 @@ export struct PassDetailSheet {
         track: this.detail.track,
         trackColor: this.detail.color,
         eclipsed: this.detail.eclipsed,
-        sunAzDeg: this.detail.sunAzDeg,
-        sunElevDeg: this.detail.sunElevDeg,
-        moonAzDeg: this.detail.moonAzDeg,
-        moonElevDeg: this.detail.moonElevDeg,
         headingAzDeg: this.aimAzDeg,
         headingTiltDeg: this.aimTiltDeg,
         liveAzDeg: this.liveAzDeg,
@@ -405,7 +390,8 @@ export struct PassDetailSheet {
           this.freqCard()
         }
         .width('100%')
-        .padding(12)
+        // 预留右侧滚动条宽度，避免悬浮滚动条压住右对齐的频率数值
+        .padding({ left: 12, right: 20, top: 12, bottom: 12 })
         .backgroundColor($r('app.color.color_panel_data'))
         .borderRadius(14)
       }

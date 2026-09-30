@@ -9,6 +9,8 @@
  */
 
 import { WORLD_RINGS } from '../../domain/map/WorldOutline';
+import { ENTER_SCALE, PRESS_IN_MS, PRESS_OUT_MS, PRESS_SCALE } from '../components/PressFx';
+import { TAB_BAR_CLEARANCE } from '../../common/LayoutMetrics';
 import { SatelliteApp } from '../../common/SatelliteApp';
 import { SelectedSats } from '../../common/SelectedSats';
 import { AppSettings } from '../../common/AppSettings';
@@ -18,11 +20,13 @@ import { createOrbitalObject } from '../../domain/predict/OrbitalFactory';
 import { SatPassEvent, SatPassFinder } from '../../domain/predict/SatPassFinder';
 import { SatOrbitalObject } from '../../domain/predict/OrbitalObject';
 import { SatOrbitalPos } from '../../domain/predict/OrbitalPos';
+import { SatGeoPos } from '../../domain/predict/GeoPos';
 import { positionToQth } from '../../domain/qth/QthConverter';
 import { toDegrees } from '../../common/utils/MathUtils';
-import { RAD2DEG, DEG2RAD } from '../../domain/predict/Constants';
+import { RAD2DEG, DEG2RAD, EARTH_RADIUS } from '../../domain/predict/Constants';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 
+const TAB_MAP = 1;
 const MAP_REFRESH_MS = 1000;
 const TRACK_SAMPLE_STEP_MS = 60000;
 const TRACK_PERIODS = 2.0;
@@ -69,7 +73,10 @@ class MapLiveInfo {
   az: string;
   el: string;
   dist: string;
+  /** 是否在地平线以上（可见） */
   above: boolean;
+  /** 仰角数值（度），用于把可见星按仰角从高到低排 */
+  elDeg: number;
 
   constructor(catnum: number, name: string, color: string) {
     this.catnum = catnum;
@@ -79,6 +86,7 @@ class MapLiveInfo {
     this.el = '--';
     this.dist = '--';
     this.above = false;
+    this.elDeg = -999;
   }
 }
 
@@ -113,7 +121,15 @@ export struct MapPage {
   @StorageLink('data_version') @Watch('recompute') dataVersion: number = 0;
   @StorageLink('station_latitude') @Watch('recompute') stationLat: number = 48.2;
   @StorageLink('station_longitude') @Watch('recompute') stationLon: number = 16.37;
+  @StorageLink('station_altitude') @Watch('recompute') stationAlt: number = 0;
+  @StorageProp('current_tab') @Watch('onTabChanged') currentTab: number = TAB_MAP;
 
+  private dirty: boolean = false;
+  @State pressedBtn: string = '';
+  @State btnEntered: boolean = false;
+  /** 切换卫星时中间文字信息的切换动画：进度 0→1，方向 -1 上一颗 / +1 下一颗 */
+  @State infoFx: number = 1;
+  @State infoDir: number = 1;
   private app: SatelliteApp = SatelliteApp.getInstance();
   private finder: SatPassFinder = new SatPassFinder();
   private settings: RenderingContextSettings = new RenderingContextSettings(true);
@@ -124,10 +140,12 @@ export struct MapPage {
   private lastPassRefresh: number = 0;
 
   aboutToAppear(): void {
-    this.recompute();
+    this.dirty = false;
+    this.doRecompute();
     this.timerId = setInterval((): void => {
       this.nowTs = Date.now();
       this.refreshSelectedPass(false);
+      this.refreshSelectedTrack();
       this.followSelectedSat();
       this.drawNow();
       this.updateLiveList();
@@ -141,7 +159,24 @@ export struct MapPage {
     }
   }
 
+  /** 本页不可见时只记脏标记：选星/换站点不再同步触发这里 48h 过境+轨迹重算。 */
   recompute(): void {
+    if (this.currentTab !== TAB_MAP) {
+      this.dirty = true;
+      return;
+    }
+    this.dirty = false;
+    this.doRecompute();
+  }
+
+  onTabChanged(): void {
+    if (this.currentTab === TAB_MAP && this.dirty) {
+      this.dirty = false;
+      this.doRecompute();
+    }
+  }
+
+  private doRecompute(): void {
     const prevCat = this.selectedCatnum();
     const cats = SelectedSats.getCats();
     const store = this.app.getStore();
@@ -169,29 +204,7 @@ export struct MapPage {
         hilog.warn(0x0001, 'MapPage', `pass fail ${satData.name}`);
       }
       if (obj.data.meanmo > 1e-8) {
-        // Ground track: 2 orbital periods from now
-        const lats: number[] = [];
-        const lons: number[] = [];
-        const times: number[] = [];
-        const periodMs = obj.data.orbitalPeriod * 60000;
-        const end = now + TRACK_PERIODS * periodMs;
-        let t = now;
-        let guard = 0;
-        while (t <= end && guard < 4000) {
-          try {
-            const pos = obj.getPosition(station, t);
-            lats.push(pos.latitude * RAD2DEG);
-            lons.push(this.wrapLon(pos.longitude * RAD2DEG));
-            times.push(t);
-          } catch (e) {
-            // propagation failed for this sample: keep the partial track
-          }
-          t += TRACK_SAMPLE_STEP_MS;
-          guard++;
-        }
-        info.lats = lats;
-        info.lons = lons;
-        info.times = times;
+        this.sampleTrack(info, now, station);
       }
       list.push(info);
     }
@@ -202,6 +215,47 @@ export struct MapPage {
     this.followSelectedSat();
     this.updateLiveList();
     this.drawNow();
+  }
+
+  /** Ground track samples: TRACK_PERIODS orbital periods ahead of [now]. */
+  private sampleTrack(info: MapSatInfo, now: number, station: SatGeoPos): void {
+    const lats: number[] = [];
+    const lons: number[] = [];
+    const times: number[] = [];
+    const end = now + TRACK_PERIODS * info.obj.data.orbitalPeriod * 60000;
+    let t = now;
+    let guard = 0;
+    while (t <= end && guard < 4000) {
+      try {
+        const pos = info.obj.getPosition(station, t);
+        lats.push(pos.latitude * RAD2DEG);
+        lons.push(this.wrapLon(pos.longitude * RAD2DEG));
+        times.push(t);
+      } catch (e) {
+        // propagation failed for this sample: keep the partial track
+      }
+      t += TRACK_SAMPLE_STEP_MS;
+      guard++;
+    }
+    info.lats = lats;
+    info.lons = lons;
+    info.times = times;
+  }
+
+  /**
+   * 轨道采样固定在 recompute 时刻，随时间推移未来采样点会被耗尽（2 个轨道周期后
+   * 轨迹消失）。这里在剩余未来采样不足 10 分钟时重新采样当前卫星的轨迹。
+   */
+  private refreshSelectedTrack(): void {
+    const info = this.selectedSat();
+    if (info === null || info.times.length === 0) {
+      return;
+    }
+    const last = info.times[info.times.length - 1];
+    if (this.nowTs < last - 600000) {
+      return;
+    }
+    this.sampleTrack(info, this.nowTs, AppSettings.getStation());
   }
 
   private selectedCatnum(): number {
@@ -298,6 +352,8 @@ export struct MapPage {
     this.followSelectedSat();
     this.updateLiveList();
     this.drawNow();
+    this.infoDir = -1;
+    this.playInfoFx();
   }
 
   private selectNext(): void {
@@ -309,6 +365,8 @@ export struct MapPage {
     this.followSelectedSat();
     this.updateLiveList();
     this.drawNow();
+    this.infoDir = 1;
+    this.playInfoFx();
   }
 
   private findSat(all: SatOrbitalData[], catnum: number): SatOrbitalData | null {
@@ -470,37 +528,27 @@ export struct MapPage {
     ctx.restore();
   }
 
-  /** Coverage circle of the satellite, longitudes unwrapped around the view center. */
+  /**
+   * Coverage circle of the satellite. Under this map's local true-scale projection
+   * (longitude stretched by 1/cos(centerLat), latitude linear) a spherical cap of
+   * angular radius beta centred on the sub-satellite point maps to a true circle, so
+   * it is drawn in pixel space. This avoids the pole/antimeridian self-intersection
+   * that made the outline malformed at high latitudes.
+   */
   private drawFootprint(ctx: CanvasRenderingContext2D, pos: SatOrbitalPos, width: number, height: number): void {
-    const circle = pos.getRangeCircle();
-    if (circle.length === 0) {
+    const betaRad = Math.acos(EARTH_RADIUS / (EARTH_RADIUS + pos.altitude));
+    const radiusPx = betaRad * RAD2DEG * (height / VIEW_LAT_SPAN);
+    if (!Number.isFinite(radiusPx) || radiusPx <= 0) {
       return;
     }
+    const x = this.px(this.wrapLon(toDegrees(pos.longitude)), width);
+    const y = this.py(toDegrees(pos.latitude), height);
     ctx.save();
     ctx.strokeStyle = FOOTPRINT_COLOR;
     ctx.fillStyle = FOOTPRINT_COLOR;
     ctx.lineWidth = 1.5;
-    let prev = circle[0].longitude;
-    const shift = Math.round((this.viewCenterLon - prev) / 360.0) * 360.0;
     ctx.beginPath();
-    for (let j = 0; j < circle.length; j++) {
-      let lon = circle[j].longitude;
-      while (lon - prev > 180.0) {
-        lon -= 360.0;
-      }
-      while (lon - prev < -180.0) {
-        lon += 360.0;
-      }
-      prev = lon;
-      const x = this.pxRaw(lon + shift, width);
-      const y = this.py(circle[j].latitude, height);
-      if (j === 0) {
-        ctx.moveTo(x, y);
-      } else {
-        ctx.lineTo(x, y);
-      }
-    }
-    ctx.closePath();
+    ctx.arc(x, y, radiusPx, 0, Math.PI * 2);
     ctx.globalAlpha = 0.18;
     ctx.fill();
     ctx.globalAlpha = 0.75;
@@ -773,15 +821,24 @@ export struct MapPage {
       const row = new MapLiveInfo(sat.catnum, sat.name, sat.color);
       try {
         const p = sat.obj.getFullPosition(station, this.nowTs);
+        const elDeg = toDegrees(p.elevation);
         row.az = `${toDegrees(p.azimuth).toFixed(0)}°`;
-        row.el = `${toDegrees(p.elevation).toFixed(0)}°`;
+        row.el = `${elDeg.toFixed(0)}°`;
         row.dist = `${p.distance.toFixed(0)}km`;
         row.above = p.aboveHorizon;
+        row.elDeg = elDeg;
       } catch (e) {
         // keep placeholders
       }
       rows.push(row);
     }
+    // 可见（地平线以上）的置顶，且按仰角从高到低排；不可见的保持原顺序
+    rows.sort((a: MapLiveInfo, b: MapLiveInfo): number => {
+      if (a.above === b.above) {
+        return a.above ? b.elDeg - a.elDeg : 0;
+      }
+      return a.above ? -1 : 1;
+    });
     this.liveList = rows;
   }
 
@@ -800,6 +857,44 @@ export struct MapPage {
     return `${hh}:${mm}`;
   }
 
+  // ---- 按钮动画 ----
+
+  /**
+   * 卫星信息切换动画：与卫星页选择动画同一套（320ms + Friction）。
+   * 先把进度瞬回 0（duration=0 不产生动画），下一帧再动画到 1，
+   * 避免同一帧"归零 + 动画到 1"被吞掉。
+   */
+  private playInfoFx(): void {
+    this.getUIContext().animateTo({ duration: 0, curve: Curve.Linear }, (): void => {
+      this.infoFx = 0;
+    });
+    setTimeout((): void => {
+      this.getUIContext().animateTo({ duration: 320, curve: Curve.Friction }, (): void => {
+        this.infoFx = 1;
+      });
+    }, 0);
+  }
+
+  /** 入场：整组按钮从 0.86 回弹到 1；按压：当前按钮收到 0.9 再回弹。 */
+  private pressScale(key: string): number {
+    const base = this.btnEntered ? 1 : ENTER_SCALE;
+    return this.pressedBtn === key ? base * PRESS_SCALE : base;
+  }
+
+  private onBtnTouch(key: string, event: TouchEvent): void {
+    if (event.type === TouchType.Down) {
+      this.getUIContext().animateTo({ duration: PRESS_IN_MS, curve: Curve.Friction }, (): void => {
+        this.pressedBtn = key;
+      });
+    } else if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+      this.getUIContext().animateTo({ duration: PRESS_OUT_MS, curve: Curve.Friction }, (): void => {
+        if (this.pressedBtn === key) {
+          this.pressedBtn = '';
+        }
+      });
+    }
+  }
+
   // ---- ui ----
 
   build() {
@@ -813,6 +908,10 @@ export struct MapPage {
           .fontColor(Color.White)
           .backgroundColor($r('app.color.color_primary'))
           .enabled(this.sats.length > 0)
+          .scale({ x: this.pressScale('map-prev'), y: this.pressScale('map-prev') })
+          .onTouch((event: TouchEvent): void => {
+            this.onBtnTouch('map-prev', event);
+          })
           .onClick((): void => {
             this.selectPrev()
           })
@@ -821,7 +920,8 @@ export struct MapPage {
             .fontSize(16)
             .fontWeight(FontWeight.Bold)
             .fontColor($r('app.color.color_text'))
-            .maxLines(1)
+            .maxLines(2)
+            .textAlign(TextAlign.Center)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
           Row({ space: 4 }) {
             Text(this.countdownHint())
@@ -835,6 +935,9 @@ export struct MapPage {
         }
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Center)
+        // 切换卫星：文字按方向滑入 + 淡入（320ms Friction）
+        .opacity(0.15 + 0.85 * this.infoFx)
+        .translate({ x: 12 * this.infoDir * (1 - this.infoFx) })
 
         Button('›')
           .type(ButtonType.Circle)
@@ -844,12 +947,22 @@ export struct MapPage {
           .fontColor(Color.White)
           .backgroundColor($r('app.color.color_primary'))
           .enabled(this.sats.length > 0)
+          .scale({ x: this.pressScale('map-next'), y: this.pressScale('map-next') })
+          .onTouch((event: TouchEvent): void => {
+            this.onBtnTouch('map-next', event);
+          })
           .onClick((): void => {
             this.selectNext()
           })
       }
       .width('100%')
-      .padding({ left: 14, right: 14, top: 8, bottom: 0 })
+      // 收窄左右留白，给过长的卫星名留出更多宽度
+      .padding({ left: 8, right: 8, top: 8, bottom: 0 })
+      .onAppear((): void => {
+        this.getUIContext().animateTo({ duration: PRESS_OUT_MS, curve: Curve.Friction }, (): void => {
+          this.btnEntered = true;
+        });
+      })
 
       // China-viewport night map, moderate size (not stretched full screen)
       Stack() {
@@ -890,14 +1003,8 @@ export struct MapPage {
                 .fontWeight(FontWeight.Bold)
                 .fontColor($r('app.color.color_text'))
                 .layoutWeight(1)
-                .maxLines(1)
+                .maxLines(2)
                 .textOverflow({ overflow: TextOverflow.Ellipsis })
-              Text(this.shadowText())
-                .fontSize(12)
-                .fontColor($r('app.color.color_text_secondary'))
-              Text(this.statusText())
-                .fontSize(12)
-                .fontColor($r('app.color.color_primary'))
             }
             .width('100%')
 
@@ -963,12 +1070,26 @@ export struct MapPage {
             ForEach(this.liveList, (item: MapLiveInfo) => {
               Row({ space: 8 }) {
                 Circle({ width: 8, height: 8 }).fill(item.color)
-                Text(item.name)
-                  .fontSize(13)
-                  .fontColor($r('app.color.color_text'))
-                  .layoutWeight(1)
-                  .maxLines(1)
-                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                // 名称 + 紧跟其后的「可见」标记（可见星已置顶）
+                Row({ space: 4 }) {
+                  Text(item.name)
+                    .fontSize(13)
+                    .fontColor($r('app.color.color_text'))
+                    .maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    .layoutWeight(1)
+                  if (item.above) {
+                    Text('可见')
+                      .fontSize(10)
+                      .fontWeight(FontWeight.Bold)
+                      .fontColor(Color.White)
+                      .backgroundColor($r('app.color.color_primary'))
+                      .borderRadius(6)
+                      .padding({ left: 5, right: 5, top: 1, bottom: 1 })
+                  }
+                }
+                .layoutWeight(1)
+
                 Text(`方位 ${item.az}`)
                   .fontSize(12)
                   .fontColor($r('app.color.color_text_secondary'))
@@ -978,11 +1099,6 @@ export struct MapPage {
                 Text(item.dist)
                   .fontSize(12)
                   .fontColor($r('app.color.color_text_secondary'))
-                if (item.above) {
-                  Text('可见')
-                    .fontSize(11)
-                    .fontColor($r('app.color.color_primary'))
-                }
               }
               .width('100%')
               .padding({ top: 3, bottom: 3 })
@@ -990,6 +1106,8 @@ export struct MapPage {
           }
           .width('100%')
           .alignItems(HorizontalAlign.Start)
+          // 预留右侧滚动条宽度，避免悬浮滚动条压住文字；底部再给胶囊栏留空间
+          .padding({ right: 8, bottom: TAB_BAR_CLEARANCE })
         }
         .layoutWeight(1)
         .width('100%')

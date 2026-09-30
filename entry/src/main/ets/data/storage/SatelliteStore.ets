@@ -11,6 +11,9 @@ import { bytesToString, stringToBytes } from '../../common/utils/TextUtils';
 
 const STORE_FILE = 'satellites.jsonl';
 const TRANSPONDER_FILE = 'transponders.json';
+/** 落盘分片行数与每片之间让帧时长：避免上万条一次性阻塞主线程 */
+const SAVE_CHUNK_ROWS = 2000;
+const SAVE_YIELD_MS = 16;
 
 export class SatelliteStore {
   private list: SatOrbitalData[] = [];
@@ -262,9 +265,23 @@ export class SatelliteStore {
       const path = `${this.context.filesDir}/${STORE_FILE}`;
       const file = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
       try {
-        const content = this.serialize(this.list);
-        const buffer = stringToBytes(content);
-        fs.writeSync(file.fd, buffer.buffer);
+        // 分片序列化 + 分片写入并让帧：上万条一次性 stringify+写盘会长时间阻塞主线程，
+        // 表现为启动后几秒内点哪都卡。
+        const total = this.list.length;
+        let start = 0;
+        while (start < total) {
+          const end = Math.min(total, start + SAVE_CHUNK_ROWS);
+          const lines: string[] = [];
+          for (let i = start; i < end; i++) {
+            lines.push(this.serializeOne(this.list[i]));
+          }
+          const buffer = stringToBytes(`${lines.join('\n')}\n`);
+          fs.writeSync(file.fd, buffer.buffer);
+          start = end;
+          if (start < total) {
+            await SatelliteStore.yieldFrame();
+          }
+        }
       } finally {
         fs.closeSync(file);
       }
@@ -308,13 +325,26 @@ export class SatelliteStore {
   private serialize(list: SatOrbitalData[]): string {
     const lines: string[] = [];
     for (let i = 0; i < list.length; i++) {
-      const s = list[i];
-      lines.push(JSON.stringify({
-        name: s.name, epoch: s.epoch, meanmo: s.meanmo, eccn: s.eccn, incl: s.incl,
-        raan: s.raan, argper: s.argper, meanan: s.meanan, catnum: s.catnum, bstar: s.bstar, ndot: s.ndot
-      }));
+      lines.push(this.serializeOne(list[i]));
     }
     return lines.join('\n');
+  }
+
+  /** 单条序列化（分片保存时逐条调用） */
+  private serializeOne(s: SatOrbitalData): string {
+    return JSON.stringify({
+      name: s.name, epoch: s.epoch, meanmo: s.meanmo, eccn: s.eccn, incl: s.incl,
+      raan: s.raan, argper: s.argper, meanan: s.meanan, catnum: s.catnum, bstar: s.bstar, ndot: s.ndot
+    });
+  }
+
+  /** 让帧：把主线程还给渲染 */
+  private static yieldFrame(): Promise<void> {
+    return new Promise<void>((resolve: () => void) => {
+      setTimeout((): void => {
+        resolve();
+      }, SAVE_YIELD_MS);
+    });
   }
 
   private deserialize(content: string): SatOrbitalData[] {
@@ -406,6 +436,12 @@ export class SatelliteDataSource implements IDataSource {
   notifyDataAdd(index: number): void {
     for (const listener of this.listeners) {
       listener.onDataAdd(index);
+    }
+  }
+
+  notifyDataDelete(index: number): void {
+    for (const listener of this.listeners) {
+      listener.onDataDelete(index);
     }
   }
 
