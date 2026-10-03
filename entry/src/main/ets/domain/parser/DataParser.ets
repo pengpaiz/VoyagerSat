@@ -47,7 +47,7 @@ export class SatDataParser {
     return result;
   }
 
-  /** Parse a SatNOGS-style transponder JSON array (the accelerarted mirror trans.json). */
+  /** Parse the transponder JSON array served by the built-in mirror (trans.json). */
   parseTransponderJSON(text: string): SatRadio[] {
     const result: SatRadio[] = [];
     try {

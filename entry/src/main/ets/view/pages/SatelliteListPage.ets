@@ -1,11 +1,12 @@
-import { SatelliteApp } from '../../common/SatelliteApp';
+﻿import { SatelliteApp } from '../../common/SatelliteApp';
 import { SatelliteDataSource } from '../../data/storage/SatelliteStore';
 import { SatOrbitalData } from '../../domain/predict/OrbitalData';
 import { promptAction, uiMaterial } from '@kit.ArkUI';
 import { ISS_CATNUM } from '../../common/SatelliteApp';
 import { SelectedSats } from '../../common/SelectedSats';
+import { Favorites } from '../../common/Favorites';
 import { ENTER_SCALE, PRESS_IN_MS, PRESS_OUT_MS, PRESS_SCALE } from '../components/PressFx';
-import { TAB_BAR_CLEARANCE } from '../../common/LayoutMetrics';
+import { KEY_BAR_CLEARANCE, TAB_BAR_CLEARANCE } from '../../common/LayoutMetrics';
 
 /** 查询串是否纯数字：只有纯数字才需要比 NORAD 编号。 */
 function isDigits(q: string): boolean {
@@ -30,11 +31,19 @@ export struct SatelliteListPage {
   @StorageProp('selected_version') @Watch('onSelectionChanged') selVersion: number = 0;
   @StorageLink('data_version') @Watch('onDataChanged') dataVersion: number = 0;
 
-  @State searchVisible: boolean = false;
+  @State sheetVisible: boolean = false;
+  /** true = 搜索面板，false = 收藏夹面板（同一节点只能绑一个 bindSheet，用标记区分内容） */
+  @State sheetIsSearch: boolean = true;
   @State searchQuery: string = '';
   @State searchResults: SatOrbitalData[] = [];
   @State pressedBtn: string = '';
   @State btnEntered: boolean = false;
+  /** 收藏集（与「已选择」独立）：星标与收藏夹面板都读它 */
+  @StorageLink('favorite_cats') favoriteCats: number[] = [];
+  /** 收藏夹面板打开时的快照：面板内取消收藏不会让该行立刻消失 */
+  @State favList: number[] = [];
+  /** 底部预留（由 Index 按栏高+导航条避让算出后发布），保证与其它页一致 */
+  @StorageProp(KEY_BAR_CLEARANCE) barClearance: number = TAB_BAR_CLEARANCE;
 
   private app: SatelliteApp = SatelliteApp.getInstance();
   private scroller: Scroller = new Scroller();
@@ -293,7 +302,8 @@ export struct SatelliteListPage {
   private openSearch(): void {
     this.searchQuery = '';
     this.searchResults = [];
-    this.searchVisible = true;
+    this.sheetIsSearch = true;
+    this.sheetVisible = true;
   }
 
   /**
@@ -325,10 +335,6 @@ export struct SatelliteListPage {
     }
     const groups = this.splitBySelection(list);
     this.searchResults = groups[0].concat(groups[1]);
-  }
-
-  private datasetColor(item: SatOrbitalData): ResourceColor {
-    return item.isDeepSpace ? '#E67E22' : '#2ECC71';
   }
 
   build() {
@@ -381,13 +387,15 @@ export struct SatelliteListPage {
             // 末尾占位项：给滚动内容留出胶囊栏的空间（放在内容里，而不是给 List 加 padding，
             // 否则会把 List 可视区缩小、底部永远空一条）
             ListItem() {
-              Column().width('100%').height(TAB_BAR_CLEARANCE)
+              Column().width('100%').height(this.barClearance)
             }
           }
           .layoutWeight(1)
           .width('100%')
           .padding({ left: 14, right: 14 })
           .sticky(StickyStyle.Header)
+          // 关闭右侧滚动条（仍可正常滑动）
+          .scrollBar(BarState.Off)
         }
       }
       .width('100%')
@@ -399,10 +407,99 @@ export struct SatelliteListPage {
     }
     .width('100%')
     .height('100%')
-    .padding({ bottom: 8 })
-    .bindSheet($$this.searchVisible, this.searchSheetBuilder(), {
+    .bindSheet($$this.sheetVisible, this.sheetBuilder(), {
       detents: [SheetSize.MEDIUM, SheetSize.LARGE]
     })
+  }
+
+  /** 唯一的面板入口：按标记决定显示搜索还是收藏夹（同一节点只能绑一个 bindSheet） */
+  @Builder
+  private sheetBuilder() {
+    if (this.sheetIsSearch) {
+      this.searchSheetBuilder()
+    } else {
+      this.favSheetBuilder()
+    }
+  }
+
+  @Builder
+  private favSheetBuilder() {
+    Column({ space: 10 }) {
+      Text(`收藏夹（${this.favList.length}）`)
+        .fontSize(15)
+        .fontWeight(FontWeight.Bold)
+        .fontColor($r('app.color.color_text'))
+
+      if (this.favList.length === 0) {
+        Text('还没有收藏：点列表每行右侧的星标即可收藏')
+          .fontSize(13)
+          .fontColor($r('app.color.color_text_secondary'))
+          .width('100%')
+          .padding({ top: 20, bottom: 20 })
+          .textAlign(TextAlign.Center)
+      } else {
+        List({ space: 6 }) {
+          ForEach(this.favList, (catnum: number) => {
+            ListItem() {
+              Row({ space: 8 }) {
+                Column({ space: 2 }) {
+                  Text(this.nameMain(this.favName(catnum)))
+                    .fontSize(13)
+                    .fontWeight(FontWeight.Medium)
+                    .fontColor($r('app.color.color_text'))
+                    .maxLines(2)
+                    .wordBreak(WordBreak.BREAK_WORD)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  if (this.nameParen(this.favName(catnum)).length > 0) {
+                    Text(this.nameParen(this.favName(catnum)))
+                      .fontSize(13)
+                      .fontWeight(FontWeight.Medium)
+                      .fontColor($r('app.color.color_text'))
+                      .maxLines(1)
+                      .minFontSize(8)
+                      .maxFontSize(13)
+                      .heightAdaptivePolicy(TextHeightAdaptivePolicy.MAX_LINES_FIRST)
+                      .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  }
+                  Text(`NORAD ${catnum}`)
+                    .fontSize(11)
+                    .fontColor($r('app.color.color_text_secondary'))
+                }
+                .layoutWeight(1)
+                .alignItems(HorizontalAlign.Start)
+
+                // 直接在这里加入/移出「已选择」
+                Toggle({ type: ToggleType.Switch, isOn: this.isSelectedLocal(catnum) })
+                  .selectedColor($r('app.color.color_primary'))
+                  .onChange((isOn: boolean): void => {
+                    if (isOn !== this.isSelectedLocal(catnum)) {
+                      this.toggleSelected(catnum)
+                    }
+                  })
+
+                // 收藏星标：取消后本行仍保留（只切换图标状态），关闭面板再打开才刷新列表
+                SymbolGlyph(this.isFavoriteLocal(catnum) ? $r('sys.symbol.star_fill') : $r('sys.symbol.star'))
+                  .fontSize(18)
+                  .fontColor([this.isFavoriteLocal(catnum) ? $r('app.color.color_primary') : $r('app.color.color_text_secondary')])
+                  .padding(6)
+                  .onClick((): void => {
+                    Favorites.toggle(catnum)
+                  })
+              }
+              .width('100%')
+              .padding(8)
+              .backgroundColor($r('app.color.color_card'))
+              .borderRadius(8)
+            }
+          }, (catnum: number): string => String(catnum))
+        }
+        .layoutWeight(1)
+        .width('100%')
+      }
+    }
+    .width('100%')
+    .padding(16)
+    .alignItems(HorizontalAlign.Start)
   }
 
   @Builder
@@ -439,13 +536,25 @@ export struct SatelliteListPage {
             ListItem() {
               Row({ space: 8 }) {
                 Column({ space: 2 }) {
-                  Text(s.name)
+                  Text(this.nameMain(s.name))
                     .fontSize(13)
                     .fontWeight(FontWeight.Medium)
                     .fontColor($r('app.color.color_text'))
-                    .maxLines(1)
+                    .maxLines(2)
+                    .wordBreak(WordBreak.BREAK_WORD)
                     .textOverflow({ overflow: TextOverflow.Ellipsis })
-                  Text(`NORAD ${s.catnum} · ${s.isDeepSpace ? '深空' : '近地'}`)
+                  if (this.nameParen(s.name).length > 0) {
+                    Text(this.nameParen(s.name))
+                      .fontSize(13)
+                      .fontWeight(FontWeight.Medium)
+                      .fontColor($r('app.color.color_text'))
+                      .maxLines(1)
+                      .minFontSize(8)
+                      .maxFontSize(13)
+                      .heightAdaptivePolicy(TextHeightAdaptivePolicy.MAX_LINES_FIRST)
+                      .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  }
+                  Text(`NORAD ${s.catnum}`)
                     .fontSize(11)
                     .fontColor($r('app.color.color_text_secondary'))
                 }
@@ -483,9 +592,10 @@ export struct SatelliteListPage {
     Column({ space: 14 }) {
       this.floatButton($r('sys.symbol.arrow_up_to_line'), '返回顶部', 'top')
       this.floatButton($r('sys.symbol.magnifyingglass'), '搜索', 'search')
+      this.floatButton($r('sys.symbol.star_fill'), '收藏夹', 'favorites')
     }
     .alignItems(HorizontalAlign.End)
-    .margin({ right: 14, bottom: TAB_BAR_CLEARANCE })
+    .margin({ right: 14, bottom: this.barClearance })
     .onAppear((): void => {
       this.getUIContext().animateTo({ duration: 320, curve: Curve.Friction }, (): void => {
         this.btnEntered = true;
@@ -527,6 +637,8 @@ export struct SatelliteListPage {
           this.doDownload()
         } else if (action === 'import') {
           this.doImport()
+        } else if (action === 'favorites') {
+          this.openFavorites()
         } else {
           this.openSearch()
         }
@@ -556,22 +668,30 @@ export struct SatelliteListPage {
   private satRow(item: SatOrbitalData) {
     Row({ space: 12 }) {
       Column() {
-        Text(item.name)
+        Text(this.nameMain(item.name))
           .fontSize(15)
           .fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.color_text'))
-          // 名字过长自动换行显示（最多两行，再长才省略）
+          // 主体字号固定；过长时换行（按词换行，中文按字）
           .maxLines(2)
+          .wordBreak(WordBreak.BREAK_WORD)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Row({ space: 8 }) {
-          Text(`NORAD ${item.catnum}`)
-            .fontSize(12)
-            .fontColor($r('app.color.color_text_secondary'))
-          Text(item.isDeepSpace ? '深空' : '近地')
-            .fontSize(12)
-            .fontColor(this.datasetColor(item))
+        if (this.nameParen(item.name).length > 0) {
+          // 括号段单独一行：若仍放不下，自动缩小字号直到完整显示
+          Text(this.nameParen(item.name))
+            .fontSize(15)
+            .fontWeight(FontWeight.Medium)
+            .fontColor($r('app.color.color_text'))
+            .maxLines(1)
+            .minFontSize(8)
+            .maxFontSize(15)
+            .heightAdaptivePolicy(TextHeightAdaptivePolicy.MAX_LINES_FIRST)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
-        .margin({ top: 3 })
+        Text(`NORAD ${item.catnum}`)
+          .fontSize(12)
+          .fontColor($r('app.color.color_text_secondary'))
+          .margin({ top: 3 })
       }
       .layoutWeight(1)
       .alignItems(HorizontalAlign.Start)
@@ -582,6 +702,15 @@ export struct SatelliteListPage {
           if (isOn !== this.isSelectedLocal(item.catnum)) {
             this.toggleSelected(item.catnum)
           }
+        })
+
+      // 收藏星标（在选择开关之后）
+      SymbolGlyph(this.isFavoriteLocal(item.catnum) ? $r('sys.symbol.star_fill') : $r('sys.symbol.star'))
+        .fontSize(20)
+        .fontColor([this.isFavoriteLocal(item.catnum) ? $r('app.color.color_primary') : $r('app.color.color_text_secondary')])
+        .padding(6)
+        .onClick((): void => {
+          Favorites.toggle(item.catnum)
         })
 
       Row()
@@ -598,6 +727,37 @@ export struct SatelliteListPage {
 
   private isSelectedLocal(catnum: number): boolean {
     return this.selectedCats.indexOf(catnum) >= 0;
+  }
+
+  /** 名字中「括号之前」的主体（没有括号或括号开头则返回原名） */
+  private nameMain(name: string): string {
+    const i = name.indexOf('(');
+    return i > 0 ? name.substring(0, i).trim() : name;
+  }
+
+  /** 名字里的括号段（含括号，一直到结尾），没有则为空串 */
+  private nameParen(name: string): string {
+    const i = name.indexOf('(');
+    return i > 0 ? name.substring(i).trim() : '';
+  }
+
+  private isFavoriteLocal(catnum: number): boolean {
+    return this.favoriteCats.indexOf(catnum) >= 0;
+  }
+
+  /** 收藏项的名称（用于收藏夹面板） */
+  private favName(catnum: number): string {
+    const sat = this.app.getStore().getByCatnum(catnum);
+    return sat === null ? `NORAD ${catnum}` : sat.name;
+  }
+
+  private openFavorites(): void {
+    // 数据在启动时已加载到内存（不重复读盘）。
+    // 打开时快照一份收藏列表：面板内取消收藏只改变星标状态，行不立刻消失，
+    // 避免误点后行跳走；重新打开面板时才按最新收藏集刷新。
+    this.favList = Array.from(this.favoriteCats);
+    this.sheetIsSearch = false;
+    this.sheetVisible = true;
   }
 
   // ---- 悬浮按钮动画（与底栏/其他页同一套）----

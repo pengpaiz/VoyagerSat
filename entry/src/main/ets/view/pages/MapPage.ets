@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Look4Sat. World map page (PRC-standard global outline, offline canvas).
  * Night-theme fixed-view map: no pan/zoom. Shows only:
  *  - selected satellite future ground track (one line, until it exits the map)
@@ -10,7 +10,7 @@
 
 import { WORLD_RINGS } from '../../domain/map/WorldOutline';
 import { ENTER_SCALE, PRESS_IN_MS, PRESS_OUT_MS, PRESS_SCALE } from '../components/PressFx';
-import { TAB_BAR_CLEARANCE } from '../../common/LayoutMetrics';
+import { KEY_BAR_CLEARANCE, TAB_BAR_CLEARANCE } from '../../common/LayoutMetrics';
 import { SatelliteApp } from '../../common/SatelliteApp';
 import { SelectedSats } from '../../common/SelectedSats';
 import { AppSettings } from '../../common/AppSettings';
@@ -66,30 +66,6 @@ class MapSatInfo {
   }
 }
 
-class MapLiveInfo {
-  catnum: number;
-  name: string;
-  color: string;
-  az: string;
-  el: string;
-  dist: string;
-  /** 是否在地平线以上（可见） */
-  above: boolean;
-  /** 仰角数值（度），用于把可见星按仰角从高到低排 */
-  elDeg: number;
-
-  constructor(catnum: number, name: string, color: string) {
-    this.catnum = catnum;
-    this.name = name;
-    this.color = color;
-    this.az = '--';
-    this.el = '--';
-    this.dist = '--';
-    this.above = false;
-    this.elDeg = -999;
-  }
-}
-
 /** 详情面板数据项：@Prop 保证父组件每次重渲染（每秒）都同步最新数值。 */
 @Component
 struct MapInfoChip {
@@ -112,7 +88,6 @@ struct MapInfoChip {
 @Component
 export struct MapPage {
   @State sats: MapSatInfo[] = [];
-  @State liveList: MapLiveInfo[] = [];
   @State selectedIndex: number = 0;
   @State nowTs: number = Date.now();
   @State viewCenterLon: number = DEFAULT_CENTER_LON;
@@ -127,6 +102,8 @@ export struct MapPage {
   private dirty: boolean = false;
   @State pressedBtn: string = '';
   @State btnEntered: boolean = false;
+  /** 底部预留（由 Index 按栏高+导航条避让算出后发布） */
+  @StorageProp(KEY_BAR_CLEARANCE) barClearance: number = TAB_BAR_CLEARANCE;
   /** 切换卫星时中间文字信息的切换动画：进度 0→1，方向 -1 上一颗 / +1 下一颗 */
   @State infoFx: number = 1;
   @State infoDir: number = 1;
@@ -148,8 +125,7 @@ export struct MapPage {
       this.refreshSelectedTrack();
       this.followSelectedSat();
       this.drawNow();
-      this.updateLiveList();
-    }, MAP_REFRESH_MS);
+      }, MAP_REFRESH_MS);
   }
 
   aboutToDisappear(): void {
@@ -213,7 +189,6 @@ export struct MapPage {
     this.selectedIndex = this.indexOfCat(prevCat);
     this.lastPassRefresh = Date.now();
     this.followSelectedSat();
-    this.updateLiveList();
     this.drawNow();
   }
 
@@ -350,7 +325,6 @@ export struct MapPage {
     this.selectedIndex = (this.selectedIndex + this.sats.length - 1) % this.sats.length;
     this.refreshSelectedPass(true);
     this.followSelectedSat();
-    this.updateLiveList();
     this.drawNow();
     this.infoDir = -1;
     this.playInfoFx();
@@ -363,7 +337,6 @@ export struct MapPage {
     this.selectedIndex = (this.selectedIndex + 1) % this.sats.length;
     this.refreshSelectedPass(true);
     this.followSelectedSat();
-    this.updateLiveList();
     this.drawNow();
     this.infoDir = 1;
     this.playInfoFx();
@@ -812,36 +785,6 @@ export struct MapPage {
     return info === null ? 'NORAD --' : `NORAD ${info.catnum}`;
   }
 
-  /** Live az/el/range of every selected satellite for the details list. */
-  private updateLiveList(): void {
-    const station = AppSettings.getStation();
-    const rows: MapLiveInfo[] = [];
-    for (let i = 0; i < this.sats.length; i++) {
-      const sat = this.sats[i];
-      const row = new MapLiveInfo(sat.catnum, sat.name, sat.color);
-      try {
-        const p = sat.obj.getFullPosition(station, this.nowTs);
-        const elDeg = toDegrees(p.elevation);
-        row.az = `${toDegrees(p.azimuth).toFixed(0)}°`;
-        row.el = `${elDeg.toFixed(0)}°`;
-        row.dist = `${p.distance.toFixed(0)}km`;
-        row.above = p.aboveHorizon;
-        row.elDeg = elDeg;
-      } catch (e) {
-        // keep placeholders
-      }
-      rows.push(row);
-    }
-    // 可见（地平线以上）的置顶，且按仰角从高到低排；不可见的保持原顺序
-    rows.sort((a: MapLiveInfo, b: MapLiveInfo): number => {
-      if (a.above === b.above) {
-        return a.above ? b.elDeg - a.elDeg : 0;
-      }
-      return a.above ? -1 : 1;
-    });
-    this.liveList = rows;
-  }
-
   private phaseText(): string {
     const pos = this.currentPosition();
     if (pos === null) {
@@ -992,132 +935,112 @@ export struct MapPage {
       .aspectRatio(1.25)
       .clip(true)
 
-      // Details panel: fills the remaining screen
-      Column() {
-        Scroll() {
-          Column({ space: 6 }) {
-            Row({ space: 8 }) {
-              Circle({ width: 10, height: 10 }).fill(this.maybeColor())
-              Text(this.maybeName())
-                .fontSize(14)
-                .fontWeight(FontWeight.Bold)
-                .fontColor($r('app.color.color_text'))
-                .layoutWeight(1)
-                .maxLines(2)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-            }
-            .width('100%')
+      // 详情面板：按类别分组、组间留白、等分铺满任务栏以上区域（不滚动）
+      Column({ space: 8 }) {
+        // 当前卫星
+        Row({ space: 8 }) {
+          Circle({ width: 10, height: 10 }).fill(this.maybeColor())
+          Text(this.maybeName())
+            .fontSize(15)
+            .fontWeight(FontWeight.Bold)
+            .fontColor($r('app.color.color_text'))
+            .layoutWeight(1)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        .width('100%')
 
-            Row({ space: 6 }) {
-              MapInfoChip({ text: this.azimuthText() })
-              MapInfoChip({ text: this.elevationText() })
-              MapInfoChip({ text: this.altitudeText() })
-            }
-            .width('100%')
-
-            Row({ space: 6 }) {
-              MapInfoChip({ text: this.rangeText() })
-              MapInfoChip({ text: this.rateText() })
-              MapInfoChip({ text: this.velocityText() })
-            }
-            .width('100%')
-
-            Row({ space: 6 }) {
-              MapInfoChip({ text: `相位 ${this.phaseText()}` })
-              MapInfoChip({ text: this.shadowText() })
-              MapInfoChip({ text: this.statusText() })
-            }
-            .width('100%')
-
-            Row({ space: 6 }) {
-              MapInfoChip({ text: `星下 ${this.posText()}` })
-            }
-            .width('100%')
-
-            Row({ space: 6 }) {
-              MapInfoChip({ text: `QTH ${this.qthText()}` })
-              MapInfoChip({ text: this.nextPassShort() })
-            }
-            .width('100%')
-
-            Row({ space: 6 }) {
-              MapInfoChip({ text: this.periodText() })
-              MapInfoChip({ text: this.inclText() })
-              MapInfoChip({ text: this.eccnText() })
-            }
-            .width('100%')
-
-            Row({ space: 6 }) {
-              MapInfoChip({ text: this.meanmoText() })
-              MapInfoChip({ text: this.noradText() })
-              MapInfoChip({ text: this.stationText() })
-            }
-            .width('100%')
-
-            Row({ space: 6 }) {
-              MapInfoChip({ text: this.stationQthText() })
-            }
-            .width('100%')
-
-            Divider()
-              .color('#2A3B52')
-              .margin({ top: 4, bottom: 2 })
-
-            Text('已选卫星实时状态')
-              .fontSize(12)
-              .fontColor($r('app.color.color_text_secondary'))
-
-            ForEach(this.liveList, (item: MapLiveInfo) => {
-              Row({ space: 8 }) {
-                Circle({ width: 8, height: 8 }).fill(item.color)
-                // 名称 + 紧跟其后的「可见」标记（可见星已置顶）
-                Row({ space: 4 }) {
-                  Text(item.name)
-                    .fontSize(13)
-                    .fontColor($r('app.color.color_text'))
-                    .maxLines(1)
-                    .textOverflow({ overflow: TextOverflow.Ellipsis })
-                    .layoutWeight(1)
-                  if (item.above) {
-                    Text('可见')
-                      .fontSize(10)
-                      .fontWeight(FontWeight.Bold)
-                      .fontColor(Color.White)
-                      .backgroundColor($r('app.color.color_primary'))
-                      .borderRadius(6)
-                      .padding({ left: 5, right: 5, top: 1, bottom: 1 })
-                  }
-                }
-                .layoutWeight(1)
-
-                Text(`方位 ${item.az}`)
-                  .fontSize(12)
-                  .fontColor($r('app.color.color_text_secondary'))
-                Text(`仰角 ${item.el}`)
-                  .fontSize(12)
-                  .fontColor($r('app.color.color_text_secondary'))
-                Text(item.dist)
-                  .fontSize(12)
-                  .fontColor($r('app.color.color_text_secondary'))
-              }
-              .width('100%')
-              .padding({ top: 3, bottom: 3 })
-            }, (item: MapLiveInfo) => item.catnum.toString())
+        // 组 1：位置与指向
+        Column({ space: 5 }) {
+          Text('位置与指向')
+            .fontSize(11)
+            .fontColor($r('app.color.color_text_secondary'))
+          Row({ space: 6 }) {
+            MapInfoChip({ text: this.azimuthText() })
+            MapInfoChip({ text: this.elevationText() })
+            MapInfoChip({ text: this.rangeText() })
           }
           .width('100%')
-          .alignItems(HorizontalAlign.Start)
-          // 预留右侧滚动条宽度，避免悬浮滚动条压住文字；底部再给胶囊栏留空间
-          .padding({ right: 8, bottom: TAB_BAR_CLEARANCE })
+          Row({ space: 6 }) {
+            MapInfoChip({ text: this.altitudeText() })
+            MapInfoChip({ text: `星下 ${this.posText()}` })
+          }
+          .width('100%')
         }
         .layoutWeight(1)
         .width('100%')
-        .edgeEffect(EdgeEffect.Spring)
-        .scrollBar(BarState.Auto)
-        .align(Alignment.Top)
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Start)
+
+        // 组 2：运动与光照
+        Column({ space: 5 }) {
+          Text('运动与光照')
+            .fontSize(11)
+            .fontColor($r('app.color.color_text_secondary'))
+          Row({ space: 6 }) {
+            MapInfoChip({ text: this.rateText() })
+            MapInfoChip({ text: this.velocityText() })
+          }
+          .width('100%')
+          Row({ space: 6 }) {
+            MapInfoChip({ text: `相位 ${this.phaseText()}` })
+            MapInfoChip({ text: this.shadowText() })
+            MapInfoChip({ text: this.statusText() })
+          }
+          .width('100%')
+        }
+        .layoutWeight(1)
+        .width('100%')
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Start)
+
+        // 组 3：轨道参数
+        Column({ space: 5 }) {
+          Text('轨道参数')
+            .fontSize(11)
+            .fontColor($r('app.color.color_text_secondary'))
+          Row({ space: 6 }) {
+            MapInfoChip({ text: this.periodText() })
+            MapInfoChip({ text: this.inclText() })
+            MapInfoChip({ text: this.eccnText() })
+          }
+          .width('100%')
+          Row({ space: 6 }) {
+            MapInfoChip({ text: this.meanmoText() })
+            MapInfoChip({ text: this.noradText() })
+          }
+          .width('100%')
+        }
+        .layoutWeight(1)
+        .width('100%')
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Start)
+
+        // 组 4：站址与过境
+        Column({ space: 5 }) {
+          Text('站址与过境')
+            .fontSize(11)
+            .fontColor($r('app.color.color_text_secondary'))
+          Row({ space: 6 }) {
+            MapInfoChip({ text: this.stationText() })
+            MapInfoChip({ text: `QTH ${this.qthText()}` })
+          }
+          .width('100%')
+          Row({ space: 6 }) {
+            MapInfoChip({ text: this.stationQthText() })
+            MapInfoChip({ text: this.nextPassShort() })
+          }
+          .width('100%')
+        }
+        .layoutWeight(1)
+        .width('100%')
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Start)
       }
       .layoutWeight(1)
       .width('100%')
-      .padding(12)
+      // 底部留出悬浮胶囊栏的空间，内容铺满到栏以上
+      .padding({ left: 12, right: 12, top: 12, bottom: this.barClearance })
       .backgroundColor($r('app.color.color_card'))
       .borderRadius(12)
       .alignItems(HorizontalAlign.Start)

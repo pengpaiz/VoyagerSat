@@ -19,6 +19,17 @@ const K_STATION_MANUAL = 'station_manual';
 /** 自定义数据源 URL（空 = 使用内置镜像） */
 const K_TLE_URL = 'settings_custom_tle_url';
 const K_TRANS_URL = 'settings_custom_transponder_url';
+/** 数据源使用情况：最近一次成功更新用的地址/时间，以及镜像、自定义地址各自最近成功时间 */
+const K_SRC_LAST_URL = 'data_source_last_url';
+const K_SRC_LAST_TIME = 'data_source_last_time';
+const K_SRC_MIRROR_TIME = 'data_source_mirror_time';
+const K_SRC_CUSTOM_TIME = 'data_source_custom_time';
+const K_SRC_CUSTOM_RESULT = 'data_source_custom_result';
+
+/** 自定义地址最近一次使用结果 */
+export const CUSTOM_RESULT_NONE = 0;
+export const CUSTOM_RESULT_OK = 1;
+export const CUSTOM_RESULT_FAIL = 2;
 
 export enum PassSortMode {
   BY_SATELLITE = 0,
@@ -39,6 +50,11 @@ export class AppSettings {
     PersistentStorage.persistProp(K_TLE_URL, '');
     PersistentStorage.persistProp(K_TRANS_URL, '');
     PersistentStorage.persistProp(K_STATION_MANUAL, false);
+    PersistentStorage.persistProp(K_SRC_LAST_URL, '');
+    PersistentStorage.persistProp(K_SRC_LAST_TIME, 0);
+    PersistentStorage.persistProp(K_SRC_MIRROR_TIME, 0);
+    PersistentStorage.persistProp(K_SRC_CUSTOM_TIME, 0);
+    PersistentStorage.persistProp(K_SRC_CUSTOM_RESULT, CUSTOM_RESULT_NONE);
     if (AppStorage.get<number>(K_STATION_VER) === undefined) {
       AppStorage.setOrCreate<number>(K_STATION_VER, 0);
     }
@@ -94,6 +110,57 @@ export class AppSettings {
 
   static setCustomTransponderUrl(url: string): void {
     AppStorage.setOrCreate<string>(K_TRANS_URL, url.trim());
+  }
+
+  // ---- 数据源使用情况（供设置页显示"当前模式 / 各自更新时间"）----
+
+  /** 记录一次成功更新：[isMirror]/[isCustom] 表示命中的是内置镜像还是用户自定义地址。
+   *  [timestamp] 传入 0 表示用当前时间；导入内置快照时用快照自带的抓取时间。 */
+  static recordDataSourceResult(url: string, isMirror: boolean, isCustom: boolean, timestamp: number = 0): void {
+    const now = timestamp > 0 ? timestamp : Date.now();
+    AppStorage.setOrCreate<string>(K_SRC_LAST_URL, url);
+    AppStorage.setOrCreate<number>(K_SRC_LAST_TIME, now);
+    if (isMirror) {
+      AppStorage.setOrCreate<number>(K_SRC_MIRROR_TIME, now);
+    }
+    if (isCustom) {
+      AppStorage.setOrCreate<number>(K_SRC_CUSTOM_TIME, now);
+    }
+  }
+
+  /** 记录自定义地址最近一次使用的结果（成功/失败），失败也会被记下来。 */
+  static recordCustomResult(ok: boolean): void {
+    AppStorage.setOrCreate<number>(K_SRC_CUSTOM_RESULT, ok ? CUSTOM_RESULT_OK : CUSTOM_RESULT_FAIL);
+  }
+
+  static getCustomResult(): number {
+    return AppStorage.get<number>(K_SRC_CUSTOM_RESULT) ?? CUSTOM_RESULT_NONE;
+  }
+
+  static getLastSourceUrl(): string {
+    return AppStorage.get<string>(K_SRC_LAST_URL) ?? '';
+  }
+
+  static getLastSourceTime(): number {
+    return AppStorage.get<number>(K_SRC_LAST_TIME) ?? 0;
+  }
+
+  static getMirrorUpdateTime(): number {
+    return AppStorage.get<number>(K_SRC_MIRROR_TIME) ?? 0;
+  }
+
+  static getCustomUpdateTime(): number {
+    return AppStorage.get<number>(K_SRC_CUSTOM_TIME) ?? 0;
+  }
+
+  /** 时间戳格式化为 yyyy-MM-dd HH:mm；0 表示还没有成功记录。 */
+  static formatTime(ms: number): string {
+    if (ms <= 0) {
+      return '—';
+    }
+    const d = new Date(ms);
+    const p2 = (v: number): string => v < 10 ? `0${v}` : `${v}`;
+    return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
   }
 
   static getMinElevation(): number {

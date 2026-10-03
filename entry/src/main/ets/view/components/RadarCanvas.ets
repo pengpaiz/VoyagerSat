@@ -21,7 +21,7 @@ const LABEL_COLOR = '#E67E22';
 export struct RadarCanvas {
   @Prop azimuthDeg: number = 0;
   @Prop elevationDeg: number = 0;
-  @Prop track: RadarTrackResult = new RadarTrackResult([], [], []);
+  @Prop @Watch('onTrackChanged') track: RadarTrackResult = new RadarTrackResult([], [], []);
   @Prop trackColor: string = '#E67E22';
   @Prop eclipsed: boolean = false;
   @Prop headingAzDeg: number = 0;
@@ -34,6 +34,17 @@ export struct RadarCanvas {
   private sweepDeg: number = 0;
   private pulse: number = 0;
   private timerId: number = -1;
+  private warmupTimer1: number = -1;
+  private warmupTimer2: number = -1;
+  /** 已卸载标记：卸载后任何遗留回调都不再重绘 */
+  private destroyed: boolean = false;
+
+  // ---- 轨迹点缓存：track 未变化时复用（§9/§10，避免每帧重建数组与点对象）----
+  private trackCacheValid: boolean = false;
+  private cachedXsRef: number[] = [];
+  private cachedYsRef: number[] = [];
+  private cachedRadius: number = 0;
+  private cachedPoints: RadarPoint[] = [];
 
   aboutToAppear(): void {
     this.timerId = setInterval((): void => {
@@ -42,26 +53,60 @@ export struct RadarCanvas {
       this.pulse = next >= 1 ? 0 : next;
       this.redraw();
     }, TICK_MS);
-    // 补偿 Sheet 动效/初次布局导致的漏帧
-    setTimeout((): void => {
+    // 补偿 Sheet 动效/初次布局导致的漏帧（定时器句柄保存下来，卸载时清理）
+    this.warmupTimer1 = setTimeout((): void => {
       this.redraw();
     }, 100);
-    setTimeout((): void => {
+    this.warmupTimer2 = setTimeout((): void => {
       this.redraw();
     }, 400);
   }
 
   aboutToDisappear(): void {
+    this.destroyed = true;
     if (this.timerId >= 0) {
       clearInterval(this.timerId);
       this.timerId = -1;
     }
+    if (this.warmupTimer1 >= 0) {
+      clearTimeout(this.warmupTimer1);
+      this.warmupTimer1 = -1;
+    }
+    if (this.warmupTimer2 >= 0) {
+      clearTimeout(this.warmupTimer2);
+      this.warmupTimer2 = -1;
+    }
+  }
+
+  /** 轨迹数据变化：作废点位缓存，下一帧重建一次。 */
+  onTrackChanged(): void {
+    this.trackCacheValid = false;
   }
 
   private redraw(): void {
+    if (this.destroyed) {
+      return;
+    }
     if (this.lastW > 0) {
       this.drawCanvas(this.lastW, this.lastW);
     }
+  }
+
+  /** 带缓存的轨迹点构建：只有 track 引用或半径变化时才真正重建。 */
+  private trackPoints(radius: number): RadarPoint[] {
+    const xs = this.track.xs;
+    const ys = this.track.ys;
+    if (this.trackCacheValid && this.cachedXsRef === xs && this.cachedYsRef === ys
+      && this.cachedRadius === radius) {
+      return this.cachedPoints;
+    }
+    const pts = this.buildValidTrackPoints(xs, ys, radius);
+    this.cachedXsRef = xs;
+    this.cachedYsRef = ys;
+    this.cachedRadius = radius;
+    this.cachedPoints = pts;
+    this.trackCacheValid = true;
+    return pts;
   }
 
   private drawCanvas(width: number, height: number): void {
@@ -172,10 +217,8 @@ export struct RadarCanvas {
   }
 
   private drawTrack(ctx: CanvasRenderingContext2D, radius: number): void {
-    const xs = this.track.xs;
-    const ys = this.track.ys;
-    const pts = this.buildValidTrackPoints(xs, ys, radius);
-    hilog.info(0x0001, 'RadarTrack', `xs=${xs.length} valid=${pts.length} az=${this.headingAzDeg}`);
+    const pts = this.trackPoints(radius);
+    // 注意：这里不要打日志——drawTrack 每帧都会执行（§11 高频日志）
     if (pts.length <= 1) {
       return;
     }

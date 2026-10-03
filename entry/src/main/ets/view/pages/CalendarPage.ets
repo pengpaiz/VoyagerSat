@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Look4Sat. Calendar page: per-day count of satellites passing over the
  * station within the next 14 days, based on the selected satellites.
  */
@@ -10,8 +10,15 @@ import { SAT_COLORS } from '../../common/SatColors';
 import { SatOrbitalData } from '../../domain/predict/OrbitalData';
 import { SatPassEvent } from '../../domain/predict/SatPassFinder';
 import { CalendarForecast } from '../../domain/predict/CalendarForecast';
-import { TAB_BAR_CLEARANCE } from '../../common/LayoutMetrics';
+import { KEY_BAR_CLEARANCE, TAB_BAR_CLEARANCE } from '../../common/LayoutMetrics';
 import { ENTER_SCALE, PRESS_IN_MS, PRESS_OUT_MS, PRESS_SCALE } from '../components/PressFx';
+
+/** 日历视图状态：加载中 / 就绪 / 确实为空 */
+enum CalViewState {
+  LOADING = 0,
+  READY = 1,
+  EMPTY = 2
+}
 
 const TAB_CALENDAR = 3;
 /** 切到日历页后延后多久开始重算（让入场动画先跑完，避免抢主线程） */
@@ -94,6 +101,12 @@ export struct CalendarPage {
   /** 切换月份动画：进度 0→1，方向 -1 上一月 / +1 下一月 */
   @State gridFx: number = 1;
   @State gridDir: number = 1;
+  /** 日历视图状态：加载中 / 就绪 / 确实为空 */
+  @State calState: CalViewState = CalViewState.LOADING;
+  /** 是否已完成一轮计算（用于区分"还没算完"和"确实没有"） */
+  private calcFinished: boolean = false;
+  /** 底部预留（由 Index 按栏高+导航条避让算出后发布） */
+  @StorageProp(KEY_BAR_CLEARANCE) barClearance: number = TAB_BAR_CLEARANCE;
 
   aboutToAppear(): void {
     const now = new Date();
@@ -101,7 +114,26 @@ export struct CalendarPage {
     this.month = now.getMonth();
     this.selectedMillis = this.dayStart(now.getTime());
     this.dirty = false;
-    this.recompute();
+    const cats = SelectedSats.getCats();
+    const all = this.app.getStore().getAll();
+    if (cats.length === 0 || all.length === 0) {
+      // 没有任何待计算内容：直接按"空"处理，不算加载中
+      this.calState = this.app.hasStoreLoaded() ? CalViewState.EMPTY : CalViewState.LOADING;
+      this.rebuildCells();
+      this.applyDaySelection();
+      return;
+    }
+    // 已有缓存（启动时 Index 已后台预热过）：立即汇总出结果，不显示"无数据"也不等待
+    const forecast = CalendarForecast.getInstance();
+    forecast.prepare(this.dataVersion);
+    if (forecast.hasAll(cats.slice(0, MAX_CALC_SATS))) {
+      const seq = ++this.computeSeq;
+      this.runCompute(seq);
+      return;
+    }
+    // 缓存不齐：保持加载态，延后开算（先让入场动画跑完）
+    this.calState = CalViewState.LOADING;
+    this.scheduleCompute();
   }
 
   /** 本页不可见时只记脏标记：14 天预报很贵，切到日历页再算。 */
@@ -111,6 +143,16 @@ export struct CalendarPage {
       return;
     }
     this.dirty = false;
+    const cats = SelectedSats.getCats();
+    const forecast = CalendarForecast.getInstance();
+    forecast.prepare(this.dataVersion);
+    if (forecast.hasAll(cats.slice(0, MAX_CALC_SATS))) {
+      // 缓存已热：直接汇总（毫秒级），不走"加载中"
+      const seq = ++this.computeSeq;
+      this.runCompute(seq);
+      return;
+    }
+    this.calState = CalViewState.LOADING;
     this.scheduleCompute();
   }
 
@@ -157,10 +199,12 @@ export struct CalendarPage {
     if (cats.length === 0 || all.length === 0) {
       forecast.prepare(this.dataVersion);
       this.computing = false;
+      this.calcFinished = true;
       this.stats = new Map();
       this.passesByDay = new Map();
       this.rebuildCells();
       this.applyDaySelection();
+      this.calState = this.app.hasStoreLoaded() ? CalViewState.EMPTY : CalViewState.LOADING;
       return;
     }
     // 共享缓存：启动/选星时已由后台预热过，这里通常直接命中；没命中的才补算
@@ -173,6 +217,7 @@ export struct CalendarPage {
       }
     }
     this.computing = missing.length > 0;
+    this.calcFinished = false;
     // 先用手上的缓存出图，再逐颗补算
     this.aggregate(used, minElev);
     for (let i = 0; i < missing.length; i++) {
@@ -189,6 +234,7 @@ export struct CalendarPage {
       this.aggregate(used, minElev);
     }
     this.computing = false;
+    this.calcFinished = true;
     this.aggregate(used, minElev);
   }
 
@@ -231,6 +277,21 @@ export struct CalendarPage {
     this.passesByDay = byDay;
     this.rebuildCells();
     this.applyDaySelection();
+    // 状态判定：只要汇总到任何一颗星的缓存就算"就绪"；全算完仍无缓存才是"确实为空"
+    let anyCached = false;
+    for (let i = 0; i < used.length; i++) {
+      if (forecast.has(used[i])) {
+        anyCached = true;
+        break;
+      }
+    }
+    if (anyCached) {
+      this.calState = CalViewState.READY;
+    } else if (this.calcFinished) {
+      this.calState = this.app.hasStoreLoaded() ? CalViewState.EMPTY : CalViewState.LOADING;
+    } else {
+      this.calState = CalViewState.LOADING;
+    }
   }
 
   private yieldFrame(): Promise<void> {
@@ -656,8 +717,8 @@ export struct CalendarPage {
           .padding({ top: 20, bottom: 20 })
           .textAlign(TextAlign.Center)
       } else if (this.dayList.length === 0) {
-        // 计算中先显示"正在计算"，避免误报"当日暂无达标过境"
-        Text(this.computing
+        // 加载中（含"还没开始算"）显示"正在计算"，避免误报"当日暂无达标过境"
+        Text(this.calState === CalViewState.LOADING
           ? '正在计算…'
           : (this.inForecast(this.selectedMillis) ? '当日暂无达标过境' : '该日期超出预报范围'))
           .fontSize(12)
@@ -701,7 +762,7 @@ export struct CalendarPage {
           }
           .width('100%')
           // 预留右侧滚动条宽度 + 底部给胶囊栏留空间（加在滚动内容上，页面可视区仍铺到底）
-          .padding({ right: 8, bottom: TAB_BAR_CLEARANCE })
+          .padding({ right: 8, bottom: this.barClearance })
         }
         .layoutWeight(1)
         .width('100%')

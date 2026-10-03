@@ -5,9 +5,11 @@ import { CalendarPage } from '../view/pages/CalendarPage';
 import { SettingsPage } from '../view/pages/SettingsPage';
 import { SatelliteApp } from '../common/SatelliteApp';
 import { SelectedSats } from '../common/SelectedSats';
+import { Favorites } from '../common/Favorites';
 import { AppSettings } from '../common/AppSettings';
 import { CalendarForecast } from '../domain/predict/CalendarForecast';
-import { curves, uiMaterial } from '@kit.ArkUI';
+import { KEY_BAR_CLEARANCE } from '../common/LayoutMetrics';
+import { curves, uiMaterial, window } from '@kit.ArkUI';
 
 /** 默认停留标签（2 = 过境） */
 const DEFAULT_TAB = 2;
@@ -18,10 +20,12 @@ const CENTER_ACCENT = '#FFD54F';
 /** 任务栏胶囊底：毛玻璃 + 一层很淡的白，避免深色主题下显得是黑底 */
 const BAR_CAPSULE_TINT = '#1FFFFFFF';
 /** 悬浮栏几何兜底值（vp）；真实值由容器实测高度推算，见 barHeightVp()/barBottomVp() */
-const BAR_HEIGHT_BASE = 60;
-const BAR_BOTTOM_BASE = 8;
+const BAR_HEIGHT_BASE = 70;
+const BAR_BOTTOM_BASE = 6;
 /** 悬浮栏左右边距（vp） */
 const BAR_SIDE_MARGIN = 16;
+/** 图标行相对胶囊底的内缩：保证最左/最右页签的高亮胶囊完整落在胶囊底内（不被圆角切掉） */
+const BAR_CELL_INSET = 18;
 /** 高亮胶囊宽度 = 格宽 × 该比例；胶囊高度 = 栏高 - 该值 */
 const PILL_WIDTH_RATIO = 0.78;
 const PILL_HEIGHT_INSET = 6;
@@ -65,6 +69,11 @@ struct Index {
   @State innerWidth: number = 0;
   @State isDragging: boolean = false;
   @State rootH: number = 0;
+  /** 底部导航条（手势条）避让高度：内容铺到屏底后，胶囊栏要落在它上方 */
+  @State navInset: number = 0;
+  /** 顶部状态栏避让高度：窗口铺满整屏后由页面自己让出 */
+  @State statusInset: number = 0;
+  private barClearance: number = 0;
   @State pillScaleX: number = REST_SCALE;
   @State pillScaleY: number = REST_SCALE;
   /** 页面入场进度 0→1（淡入 + 上浮） */
@@ -96,13 +105,24 @@ struct Index {
     AppStorage.setOrCreate<number>('current_tab', this.selectedIndex);
     this.app.init(getContext(this));
     SelectedSats.init();
+    Favorites.init();
     AppSettings.init();
+    // 读取状态栏/底部导航条避让高度：窗口已铺满整屏，安全区由页面自己让出
+    window.getLastWindow(getContext(this)).then((win: window.Window): void => {
+      const status = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
+      const nav = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
+      this.statusInset = this.getUIContext().px2vp(status.topRect.height);
+      this.navInset = this.getUIContext().px2vp(nav.bottomRect.height);
+      this.publishBarClearance();
+    });
     // 先加载本地数据，再静默联网更新，避免竞态导致首页空白
     this.app.loadFromDisk().then((): void => {
       // 本地数据就绪后立刻预热日历预报（后台逐颗算，不阻塞交互）
       this.warmCalendarForecast();
       this.app.silentStartupUpdate();
     });
+    // 读取内置镜像（打包快照）的版本时间，供设置页标明
+    this.app.loadSnapshotInfo();
   }
 
   /** 选择集 / 数据 / 站址变化时后台补算日历预报，使日历与过境页随时一致。 */
@@ -116,22 +136,39 @@ struct Index {
 
   // ---- 几何 ----
 
-  /** 悬浮栏高度：按容器实测高度自适应（56~66vp），不依赖机型 */
+  /** 悬浮栏高度：按容器实测高度自适应（64~76vp，比上一版更高＝向下扩展） */
   private barHeightVp(): number {
     if (this.rootH <= 0) {
       return BAR_HEIGHT_BASE;
     }
-    const scaled = Math.round(this.rootH * 0.072);
-    return Math.max(56, Math.min(66, scaled));
+    const scaled = Math.round(this.rootH * 0.085);
+    return Math.max(64, Math.min(76, scaled));
   }
 
-  /** 悬浮栏距底距离（6~12vp）：系统已处理导航条避让，这里只留视觉间隙 */
+  /** 悬浮栏距底距离（4~10vp）+ 导航条避让：让栏尽量靠下 */
   private barBottomVp(): number {
     if (this.rootH <= 0) {
       return BAR_BOTTOM_BASE;
     }
-    const scaled = Math.round(this.rootH * 0.012);
-    return Math.max(6, Math.min(12, scaled));
+    const scaled = Math.round(this.rootH * 0.010);
+    return Math.max(4, Math.min(10, scaled));
+  }
+
+  /** 悬浮栏到屏幕底的真实间距（含导航条避让区） */
+  private barBottomEdgeVp(): number {
+    return this.barBottomVp() + this.navInset;
+  }
+
+  /**
+   * 页面滚动内容需要预留的底部空间（内容铺到屏底，靠这段把最后一条滚到胶囊上方）。
+   * 发布到 AppStorage，供各页统一使用，保证五个页面底部一致。
+   */
+  private publishBarClearance(): void {
+    const clearance = Math.ceil(this.barBottomEdgeVp() + this.barHeightVp() + 6);
+    if (clearance !== this.barClearance) {
+      this.barClearance = clearance;
+      AppStorage.setOrCreate<number>(KEY_BAR_CLEARANCE, clearance);
+    }
   }
 
   /** 胶囊高度与顶部内距（垂直居中于栏内） */
@@ -339,6 +376,8 @@ struct Index {
       .vertical(false)
       .barHeight(0)
       .backgroundColor($r('app.color.color_bg'))
+      // 窗口铺满整屏后，顶部状态栏的避让由这里让出（页面内容不会被状态栏压住）
+      .padding({ top: this.statusInset })
       .onChange((index: number): void => {
         this.selectedIndex = index;
         AppStorage.setOrCreate<number>('current_tab', index);
@@ -369,6 +408,8 @@ struct Index {
             .shadow({ radius: 14, color: '#26000000', offsetY: 4 })
 
           // 高亮胶囊：跟随手势滑动，标识当前页签
+          // x 需加上 BAR_CELL_INSET：图标行整体内缩，胶囊要落在同一坐标系里，
+          // 否则在最左/最右页签时胶囊会顶到胶囊底的圆角外，看起来"没填满"
           Column()
             .width(this.cellWidth() * PILL_WIDTH_RATIO)
             .height(this.pillHeightVp())
@@ -376,59 +417,69 @@ struct Index {
             .backgroundColor($r('app.color.color_card'))
             .opacity(0.95)
             .scale({ x: this.pillScaleX, y: this.pillScaleY })
-            .position({ x: this.indicatorX - (this.cellWidth() * PILL_WIDTH_RATIO) / 2, y: this.pillTopVp() })
+            .position({
+              x: BAR_CELL_INSET + this.indicatorX - (this.cellWidth() * PILL_WIDTH_RATIO) / 2,
+              y: this.pillTopVp()
+            })
 
-          // 图标 + 文字
+          // 图标 + 文字（左右各内缩 BAR_CELL_INSET，让最外侧的高亮完整落在胶囊底内）
           Row() {
-            ForEach(this.items, (item: GlassTabItem, index: number) => {
-              Column() {
-                Stack() {
-                  // 中间（过境）底圈：未选中时淡强调色光晕；选中时由滑动胶囊负责高亮
-                  if (index === CENTER_INDEX) {
-                    Column()
-                      .width(40)
-                      .height(40)
-                      .borderRadius(20)
-                      .backgroundColor(CENTER_ACCENT)
-                      .opacity(this.activeIndex() === index ? 0 : 0.18)
+            Row() {
+              ForEach(this.items, (item: GlassTabItem, index: number) => {
+                Column() {
+                  Stack() {
+                    // 中间（过境）底圈：未选中时淡强调色光晕；选中时由滑动胶囊负责高亮
+                    if (index === CENTER_INDEX) {
+                      Column()
+                        .width(40)
+                        .height(40)
+                        .borderRadius(20)
+                        .backgroundColor(CENTER_ACCENT)
+                        .opacity(this.activeIndex() === index ? 0 : 0.18)
+                    }
+                    SymbolGlyph(item.icon)
+                      .fontSize(index === CENTER_INDEX ? 24 : (this.activeIndex() === index ? 23 : 17))
+                      .fontColor([this.itemIconColor(index)])
+                      .scale({ x: 1 + 0.14 * this.deformRatio(index), y: 1 + 0.14 * this.deformRatio(index) })
+                      .translate({ y: -2 * this.deformRatio(index) })
                   }
-                  SymbolGlyph(item.icon)
-                    .fontSize(index === CENTER_INDEX ? 24 : (this.activeIndex() === index ? 23 : 17))
-                    .fontColor([this.itemIconColor(index)])
-                    .scale({ x: 1 + 0.14 * this.deformRatio(index), y: 1 + 0.14 * this.deformRatio(index) })
-                    .translate({ y: -2 * this.deformRatio(index) })
-                }
-                .height(40)
-                .alignContent(Alignment.Center)
+                  .height(40)
+                  .alignContent(Alignment.Center)
 
-                Text(item.title)
-                  .fontSize(index === CENTER_INDEX ? 12 : 11)
-                  .fontWeight(index === CENTER_INDEX ? FontWeight.Bold : FontWeight.Normal)
-                  .fontColor(this.itemLabelColor(index))
-                  .margin({ top: 2 })
+                  Text(item.title)
+                    .fontSize(index === CENTER_INDEX ? 12 : 11)
+                    .fontWeight(index === CENTER_INDEX ? FontWeight.Bold : FontWeight.Normal)
+                    .fontColor(this.itemLabelColor(index))
+                    .margin({ top: 2 })
+                }
+                .layoutWeight(1)
+                .height('100%')
+                .justifyContent(FlexAlign.Center)
+                .onClick((): void => {
+                  this.selectTab(index);
+                })
+              }, (item: GlassTabItem): string => item.title)
+            }
+            .width('100%')
+            .height('100%')
+            // 实测「图标行内容宽」→ 计算格宽（不含内缩，胶囊位置另加 BAR_CELL_INSET）
+            .onAreaChange((_oldValue: Area, newValue: Area): void => {
+              const w = Number(newValue.width);
+              if (w > 0 && Math.abs(w - this.innerWidth) > 0.5) {
+                this.innerWidth = w;
+                if (!this.isDragging) {
+                  this.indicatorX = this.cellCenter(this.selectedIndex);
+                  this.pillScaleX = REST_SCALE;
+                  this.pillScaleY = REST_SCALE;
+                }
               }
-              .layoutWeight(1)
-              .height('100%')
-              .justifyContent(FlexAlign.Center)
-              .onClick((): void => {
-                this.selectTab(index);
-              })
-            }, (item: GlassTabItem): string => item.title)
+            })
+            .width('100%')
+            .height('100%')
           }
           .width('100%')
           .height('100%')
-          // 实测栏内宽 → 计算格宽 → 初始化胶囊位置与静止尺寸
-          .onAreaChange((_oldValue: Area, newValue: Area): void => {
-            const w = Number(newValue.width);
-            if (w > 0 && Math.abs(w - this.innerWidth) > 0.5) {
-              this.innerWidth = w;
-              if (!this.isDragging) {
-                this.indicatorX = this.cellCenter(this.selectedIndex);
-                this.pillScaleX = REST_SCALE;
-                this.pillScaleY = REST_SCALE;
-              }
-            }
-          })
+          .padding({ left: BAR_CELL_INSET, right: BAR_CELL_INSET })
           .gesture(
             PanGesture({ direction: PanDirection.All })
               .onActionStart((): void => {
@@ -474,17 +525,21 @@ struct Index {
         .height(this.barHeightVp())
       }
       .width('100%')
-      .padding({ left: BAR_SIDE_MARGIN, right: BAR_SIDE_MARGIN, bottom: this.barBottomVp() })
+      .padding({ left: BAR_SIDE_MARGIN, right: BAR_SIDE_MARGIN, bottom: this.barBottomEdgeVp() })
       .hitTestBehavior(HitTestMode.Transparent)
     }
     .width('100%')
     .height('100%')
     .backgroundColor($r('app.color.color_bg'))
-    // 实测容器可用高度（系统已扣除状态栏/导航条），据此推算栏高与底距，避免机型硬编码
+    // 窗口已铺满整屏：两个方向都由本应用绘制，这样底部不会再露出窗口背景（深色下=黑条）。
+    // 顶部状态栏的避让改由下方 Tabs 的内边距让出。
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+    // 实测容器可用尺寸，据此推算栏高/底距/页面预留，避免机型硬编码
     .onAreaChange((_oldValue: Area, newValue: Area): void => {
       const h = Number(newValue.height);
       if (h > 0 && Math.abs(h - this.rootH) > 0.5) {
         this.rootH = h;
+        this.publishBarClearance();
       }
     })
   }

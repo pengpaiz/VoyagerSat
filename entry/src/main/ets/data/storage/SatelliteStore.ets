@@ -19,6 +19,10 @@ export class SatelliteStore {
   private list: SatOrbitalData[] = [];
   private transponders: SatRadio[] = [];
   private context: common.Context | null = null;
+  /** catnum → 卫星 的惰性索引（每次数据变更后置空重建），避免每次线性查找 1.6 万条 */
+  private byCatIndex: Map<number, SatOrbitalData> | null = null;
+  /** catnum → 转发器列表 的惰性索引 */
+  private transByCatIndex: Map<number, SatRadio[]> | null = null;
 
   setContext(ctx: common.Context): void {
     this.context = ctx;
@@ -37,31 +41,49 @@ export class SatelliteStore {
   }
 
   getTranspondersFor(satCatnum: number): SatRadio[] {
-    const result: SatRadio[] = [];
-    for (let i = 0; i < this.transponders.length; i++) {
-      const t = this.transponders[i];
-      if (t.catnum !== null && t.catnum === satCatnum) {
-        result.push(t);
+    if (this.transByCatIndex === null) {
+      const index: Map<number, SatRadio[]> = new Map<number, SatRadio[]>();
+      for (let i = 0; i < this.transponders.length; i++) {
+        const t = this.transponders[i];
+        if (t.catnum === null) {
+          continue;
+        }
+        let bucket = index.get(t.catnum);
+        if (bucket === undefined) {
+          bucket = [];
+          index.set(t.catnum, bucket);
+        }
+        bucket.push(t);
       }
+      this.transByCatIndex = index;
     }
-    return result;
+    const list = this.transByCatIndex.get(satCatnum);
+    return list === undefined ? [] : list;
   }
 
   setTransponders(list: SatRadio[]): void {
     this.transponders = list;
+    this.transByCatIndex = null;
   }
 
   replaceAll(newList: SatOrbitalData[]): void {
     this.list = newList;
+    this.byCatIndex = null;
   }
 
   getByCatnum(catnum: number): SatOrbitalData | null {
-    for (let i = 0; i < this.list.length; i++) {
-      if (this.list[i].catnum === catnum) {
-        return this.list[i];
+    if (this.byCatIndex === null) {
+      const index: Map<number, SatOrbitalData> = new Map<number, SatOrbitalData>();
+      for (let i = 0; i < this.list.length; i++) {
+        const s = this.list[i];
+        if (!index.has(s.catnum)) {
+          index.set(s.catnum, s);
+        }
       }
+      this.byCatIndex = index;
     }
-    return null;
+    const found = this.byCatIndex.get(catnum);
+    return found === undefined ? null : found;
   }
 
   /** Drop older duplicates, keeping the freshest epoch per NORAD id. */
@@ -75,6 +97,7 @@ export class SatelliteStore {
       }
     }
     this.list = Array.from(byCat.values());
+    this.byCatIndex = null;
   }
 
   async load(): Promise<void> {
@@ -92,6 +115,7 @@ export class SatelliteStore {
           fs.readSync(file.fd, buffer);
           const content = bytesToString(new Uint8Array(buffer));
           this.transponders = this.deserializeTransponders(content);
+          this.transByCatIndex = null;
         } finally {
           fs.closeSync(file);
         }
@@ -109,6 +133,7 @@ export class SatelliteStore {
           fs.readSync(file.fd, buffer);
           const content = bytesToString(new Uint8Array(buffer));
           this.list = this.deserialize(content);
+          this.byCatIndex = null;
         } finally {
           fs.closeSync(file);
         }

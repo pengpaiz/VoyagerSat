@@ -1,6 +1,11 @@
 /*
  * Look4Sat. Amateur radio satellite tracker and pass predictor.
- * HarmonyOS data layer: download TLE/OMM from Celestrak/SatNOGS.
+ * HarmonyOS data layer: 卫星/转发器数据下载。
+ *
+ * 更新渠道只有两个（按顺序）：
+ *   1) 用户在设置里填的自定义 URL（可选）
+ *   2) 内置镜像（国内加速镜像）
+ * 不再使用 Celestrak 等第三方源。
  */
 
 import { http } from '@kit.NetworkKit';
@@ -12,16 +17,20 @@ import { bytesToString } from '../../common/utils/TextUtils';
 
 export const CN_TLE_URL = 'https://tledata.xanyi.eu.org/tledata/all.txt';
 export const CN_TRANSPONDER_URL = 'https://tledata.xanyi.eu.org/tledata/trans.json';
-export const CELESTRAK_CSV_URL = 'https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=csv';
-export const CELESTRAK_TLE_URL = 'https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle';
 
 export class SatelliteDownloadResult {
   dataList: SatOrbitalData[];
   count: number;
+  /** 本次数据实际来自哪个地址（用于在设置页显示"当前使用的源"） */
+  sourceUrl: string;
+  /** 本次尝试中，用户自定义地址是否失败（失败后会回退内置镜像） */
+  customFailed: boolean;
 
-  constructor(dataList: SatOrbitalData[]) {
+  constructor(dataList: SatOrbitalData[], sourceUrl: string = '', customFailed: boolean = false) {
     this.dataList = dataList;
     this.count = dataList.length;
+    this.sourceUrl = sourceUrl;
+    this.customFailed = customFailed;
   }
 }
 
@@ -38,43 +47,43 @@ export class TransponderDownloadResult {
 export class SatelliteDownloader {
   private parser: SatDataParser = new SatDataParser();
 
-  async downloadTLE(url: string = CELESTRAK_TLE_URL): Promise<SatelliteDownloadResult> {
-    const text = await this.fetchText(url);
-    const list = this.parser.parseTLEStream(text);
-    return new SatelliteDownloadResult(list);
-  }
-
-  async downloadCSV(url: string = CELESTRAK_CSV_URL): Promise<SatelliteDownloadResult> {
-    const text = await this.fetchText(url);
-    const list = this.parser.parseCSVStream(text);
-    return new SatelliteDownloadResult(list);
-  }
-
   /** Download satellites from the domestic accelerated mirror (all.txt, TLE 3-line). */
   async downloadFromMirror(url: string = CN_TLE_URL): Promise<SatelliteDownloadResult> {
     const text = await this.fetchText(url);
     const list = this.parser.parseTLEStream(text);
-    return new SatelliteDownloadResult(list);
+    return new SatelliteDownloadResult(list, url);
   }
 
-  /** Multi-source download: try mirror first, then Celestrak fallback. */
+  /**
+   * 按顺序尝试下载：自定义 URL（用户填了才用）→ 内置镜像。
+   * 任一源返回非空即成功；全部失败抛出最后一个错误。
+   */
   async downloadWithFallback(customUrl: string = ''): Promise<SatelliteDownloadResult> {
     const sources: string[] = [];
-    if (customUrl.trim().length > 0) {
-      sources.push(customUrl.trim());
+    const custom = customUrl.trim();
+    if (custom.length > 0) {
+      sources.push(custom);
     }
     sources.push(CN_TLE_URL);
-    sources.push(CELESTRAK_TLE_URL);
     let lastError: Error | null = null;
+    let customFailed = false;
     for (let i = 0; i < sources.length; i++) {
+      const isCustomSource = custom.length > 0 && sources[i] === custom;
       try {
         const result = await this.downloadAuto(sources[i]);
         if (result.count > 0) {
+          result.customFailed = customFailed;
           return result;
         }
         lastError = new Error(`empty result: ${sources[i]}`);
+        if (isCustomSource) {
+          customFailed = true;
+        }
       } catch (e) {
         lastError = e instanceof Error ? e : new Error(String(e));
+        if (isCustomSource) {
+          customFailed = true;
+        }
       }
     }
     throw lastError !== null ? lastError : new Error('all sources failed');
@@ -87,18 +96,18 @@ export class SatelliteDownloader {
   }
 
   /**
-   * 自动识别格式下载：按行内含逗号判定 CSV（Celestrak FORMAT=csv），
-   * 否则按 TLE 三行解析；解析为空时再试另一种，兼容用户自建源。
+   * 自动识别格式下载：按行内含逗号判定 CSV，否则按 TLE 三行解析；
+   * 解析为空时再试另一种，兼容用户自建源。
    */
   async downloadAuto(url: string): Promise<SatelliteDownloadResult> {
     const text = await this.fetchText(url);
     const looksCsv = SatelliteDownloader.looksLikeCsv(text);
     const first = looksCsv ? this.parser.parseCSVStream(text) : this.parser.parseTLEStream(text);
     if (first.length > 0) {
-      return new SatelliteDownloadResult(first);
+      return new SatelliteDownloadResult(first, url);
     }
     const second = looksCsv ? this.parser.parseTLEStream(text) : this.parser.parseCSVStream(text);
-    return new SatelliteDownloadResult(second);
+    return new SatelliteDownloadResult(second, url);
   }
 
   /** 采样前若干非空行，超过半数含逗号且含字母，则认为是 CSV。 */
@@ -134,19 +143,6 @@ export class SatelliteDownloader {
     const text = await this.fetchText(url);
     const list = this.parser.parseTransponderJSON(text);
     return new TransponderDownloadResult(list);
-  }
-
-  /** Auto-detect format by extension/parameters: returns parsed satellites. */
-  async download(autoFormat: boolean = true): Promise<SatelliteDownloadResult> {
-    const csvText = await this.fetchText(CELESTRAK_CSV_URL);
-    if (autoFormat && csvText.length > 0) {
-      const list = this.parser.parseCSVStream(csvText);
-      if (list.length > 0) {
-        return new SatelliteDownloadResult(list);
-      }
-    }
-    const tleList = this.parser.parseTLEStream(csvText);
-    return new SatelliteDownloadResult(tleList);
   }
 
   private fetchText(url: string): Promise<string> {

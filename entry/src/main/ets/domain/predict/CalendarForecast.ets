@@ -21,6 +21,8 @@ export const CAL_FORECAST_DAYS = 14;
 const WARM_YIELD_MS = 32;
 /** 首次预热前的等待：让启动首屏与入场动画先稳定下来 */
 const WARM_START_DELAY_MS = 500;
+/** 缓存上限：超出后淘汰最久未使用的一项（§28） */
+const MAX_CACHED_FORECASTS = 240;
 
 /** 单颗星的 14 天预报缓存（未按仰角过滤，过滤在汇总时按当前设置做）。 */
 class CachedForecast {
@@ -80,7 +82,27 @@ export class CalendarForecast {
   }
 
   has(catnum: number): boolean {
-    return this.cache.has(catnum);
+    const c = this.cache.get(catnum);
+    if (c === undefined) {
+      return false;
+    }
+    // 命中即标记为最近使用（LRU），并做上限裁剪
+    this.cache.delete(catnum);
+    this.cache.set(catnum, c);
+    return true;
+  }
+
+  /** 这批星是否全部已缓存（用于"缓存已热就立即汇总、不显示加载中"）。 */
+  hasAll(cats: number[]): boolean {
+    if (cats.length === 0) {
+      return false;
+    }
+    for (let i = 0; i < cats.length; i++) {
+      if (!this.cache.has(cats[i])) {
+        return false;
+      }
+    }
+    return true;
   }
 
   nameOf(catnum: number): string {
@@ -103,6 +125,13 @@ export class CalendarForecast {
       passes = [];
     }
     this.cache.set(catnum, new CachedForecast(satData.name, passes));
+    while (this.cache.size > MAX_CACHED_FORECASTS) {
+      const oldest = this.cache.keys().next();
+      if (oldest.done === true) {
+        break;
+      }
+      this.cache.delete(oldest.value);
+    }
   }
 
   /**

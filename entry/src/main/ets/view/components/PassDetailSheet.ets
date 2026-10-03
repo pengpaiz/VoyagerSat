@@ -2,14 +2,15 @@ import { SatelliteApp } from '../../common/SatelliteApp';
 import { AppSettings } from '../../common/AppSettings';
 import { SatPassEvent } from '../../domain/predict/SatPassFinder';
 import { createOrbitalObject } from '../../domain/predict/OrbitalFactory';
-import { SatOrbitalPos } from '../../domain/predict/OrbitalPos';
 import { SatOrbitalObject } from '../../domain/predict/OrbitalObject';
 import { SatGeoPos } from '../../domain/predict/GeoPos';
 import { RadarCanvas } from './RadarCanvas';
 import { SatRadio } from '../../domain/model/SatRadio';
 import { buildPassTrack, RadarTrackResult } from '../../domain/predict/RadarTrack';
 import { sensor } from '@kit.SensorServiceKit';
+import { promptAction } from '@kit.ArkUI';
 import { DeviceOrientation } from '../../common/DeviceOrientation';
+import { AudioRecorder } from '../../common/AudioRecorder';
 import { toDegrees } from '../../common/utils/MathUtils';
 
 const DOPPLER_REFRESH_MS = 5000;
@@ -111,7 +112,11 @@ export class PassDetailPayload {
   losTime: number = 0;
   maxElevationDeg: number = 0;
   durationMillis: number = 0;
-  tcaPos: SatOrbitalPos = new SatOrbitalPos();
+  /** TCA 时的方位/仰角/距离/高度（存数值：轨道对象是全局共享的，共享位置实例会被后续计算覆盖） */
+  tcaAzDeg: number = -999;
+  tcaElevDeg: number = -999;
+  tcaDistanceKm: number = 0;
+  tcaAltitudeKm: number = 0;
   eclipsed: boolean = false;
   track: RadarTrackResult = new RadarTrackResult([], [], []);
   freqGroups: FreqGroupView[] = [];
@@ -129,6 +134,12 @@ export struct PassDetailSheet {
   @State liveElevDeg: number = -999;
   @State liveInPass: boolean = false;
   @State liveProgress: number = 0;
+  /** 录音状态（供 UI 刷新）：是否在录、已录秒数、最近保存的文件名、按钮按压反馈 */
+  @State recActive: boolean = false;
+  @State recSeconds: number = 0;
+  @State recSavedName: string = '';
+  @State recPressed: boolean = false;
+  private recTimerId: number = -1;
   private orientation: DeviceOrientation = new DeviceOrientation();
   private declinationDeg: number = 0;
   private orbital: SatOrbitalObject | null = null;
@@ -159,6 +170,124 @@ export struct PassDetailSheet {
       clearInterval(this.liveTimerId);
       this.liveTimerId = -1;
     }
+    if (this.recTimerId >= 0) {
+      clearInterval(this.recTimerId);
+      this.recTimerId = -1;
+    }
+    // 退出详情页就停止并释放麦克风（录音必须前台进行）
+    AudioRecorder.getInstance().releaseIfRecording();
+    this.recActive = false;
+  }
+
+  // ---- 录音 ----
+
+  /** 录音/停止：前台录制到本机，首次使用会申请麦克风权限。 */
+  private async toggleRecord(): Promise<void> {
+    const recorder = AudioRecorder.getInstance();
+    if (recorder.isRecording()) {
+      const name = await recorder.stop();
+      this.stopRecTick();
+      this.recSavedName = name;
+      promptAction.showToast({ message: `已保存 ${name}` });
+      return;
+    }
+    const granted = await AudioRecorder.ensurePermission(getContext(this));
+    if (!granted) {
+      promptAction.showToast({ message: '需要麦克风权限才能录音' });
+      return;
+    }
+    try {
+      const name = await recorder.start(getContext(this));
+      this.recSavedName = name;
+      this.startRecTick();
+      promptAction.showToast({ message: '开始录音' });
+    } catch (e) {
+      promptAction.showToast({ message: '录音启动失败，请检查麦克风是否被占用' });
+    }
+  }
+
+  private startRecTick(): void {
+    this.recActive = true;
+    this.recSeconds = 0;
+    if (this.recTimerId >= 0) {
+      clearInterval(this.recTimerId);
+    }
+    this.recTimerId = setInterval((): void => {
+      this.recSeconds = Math.floor(AudioRecorder.getInstance().elapsedMillis() / 1000);
+    }, 1000);
+  }
+
+  private stopRecTick(): void {
+    this.recActive = false;
+    this.recSeconds = 0;
+    if (this.recTimerId >= 0) {
+      clearInterval(this.recTimerId);
+      this.recTimerId = -1;
+    }
+  }
+
+  private recTimeText(): string {
+    const m = Math.floor(this.recSeconds / 60);
+    const s = this.recSeconds % 60;
+    return `${m < 10 ? '0' : ''}${m}:${s < 10 ? '0' : ''}${s}`;
+  }
+
+  /** 状态副标题：未录 / 录制中提示 / 上次保存结果 */
+  private recHintText(): string {
+    if (this.recActive) {
+      return `录制中 ${this.recTimeText()} · 再点一次停止`;
+    }
+    if (this.recSavedName.length > 0) {
+      return `已保存 ${this.recSavedName}`;
+    }
+    return '把本次通联音频录到本机';
+  }
+
+  /** 雷达下方的录音条 */
+  @Builder
+  private recordBar() {
+    Row({ space: 12 }) {
+      // 圆形录音按钮：录制中显示停止图标 + 红色底
+      Column() {
+        SymbolGlyph(this.recActive ? $r('sys.symbol.stop_circle_fill') : $r('sys.symbol.mic_fill'))
+          .fontSize(22)
+          .fontColor([Color.White])
+      }
+      .width(44)
+      .height(44)
+      .borderRadius(22)
+      .justifyContent(FlexAlign.Center)
+      .alignItems(HorizontalAlign.Center)
+      .backgroundColor(this.recActive ? '#E53935' : $r('app.color.color_primary'))
+      .scale({ x: this.recPressed ? 0.9 : 1, y: this.recPressed ? 0.9 : 1 })
+      .onTouch((event: TouchEvent): void => {
+        const down = event.type === TouchType.Down;
+        this.getUIContext().animateTo({ duration: down ? 120 : 320, curve: Curve.Friction }, (): void => {
+          this.recPressed = down;
+        });
+      })
+      .onClick((): void => {
+        this.toggleRecord();
+      })
+
+      Column({ space: 3 }) {
+        Text(this.recActive ? '录音中' : '录音')
+          .fontSize(14)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.recActive ? '#E53935' : $r('app.color.color_text'))
+        Text(this.recHintText())
+          .fontSize(11)
+          .fontColor($r('app.color.color_text_secondary'))
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+    }
+    .width('100%')
+    .padding(10)
+    .backgroundColor($r('app.color.color_card'))
+    .borderRadius(14)
   }
 
   onFreqSourceChanged(): void {
@@ -207,7 +336,10 @@ export struct PassDetailSheet {
     // TCA 时刻取 AOS/LOS 中点
     const tca = Math.floor((pass.aosTime + pass.losTime) / 2);
     const pos = obj.getFullPosition(station, tca);
-    payload.tcaPos = pos;
+    payload.tcaAzDeg = degRad(pos.azimuth);
+    payload.tcaElevDeg = degRad(pos.elevation);
+    payload.tcaDistanceKm = pos.distance;
+    payload.tcaAltitudeKm = pos.altitude;
     payload.eclipsed = pos.eclipsed;
     payload.track = buildPassTrack(obj, station, pass, 1, 60);
 
@@ -368,8 +500,8 @@ export struct PassDetailSheet {
       }
 
       RadarCanvas({
-        azimuthDeg: degRad(this.detail.tcaPos.azimuth),
-        elevationDeg: degRad(this.detail.tcaPos.elevation),
+        azimuthDeg: this.detail.tcaAzDeg,
+        elevationDeg: this.detail.tcaElevDeg,
         track: this.detail.track,
         trackColor: this.detail.color,
         eclipsed: this.detail.eclipsed,
@@ -382,6 +514,9 @@ export struct PassDetailSheet {
         .padding(10)
         .backgroundColor($r('app.color.color_panel_radar'))
         .borderRadius(14)
+
+      // 录音：贴在雷达正下方（不遮挡雷达绘制），把通联音频录到本机
+      this.recordBar()
 
       Scroll() {
         Column({ space: 14 }) {
@@ -410,16 +545,16 @@ export struct PassDetailSheet {
   private statsGrid() {
     Grid() {
       GridItem() {
-        this.statBox('方位', `${degRad(this.detail.tcaPos.azimuth).toFixed(0)}°`)
+        this.statBox('方位', `${this.detail.tcaAzDeg.toFixed(0)}°`)
       }
       GridItem() {
-        this.statBox('仰角', `${degRad(this.detail.tcaPos.elevation).toFixed(0)}°`)
+        this.statBox('仰角', `${this.detail.tcaElevDeg.toFixed(0)}°`)
       }
       GridItem() {
-        this.statBox('距离', `${this.detail.tcaPos.distance.toFixed(0)} km`)
+        this.statBox('距离', `${this.detail.tcaDistanceKm.toFixed(0)} km`)
       }
       GridItem() {
-        this.statBox('高度', `${this.detail.tcaPos.altitude.toFixed(0)} km`)
+        this.statBox('高度', `${this.detail.tcaAltitudeKm.toFixed(0)} km`)
       }
       GridItem() {
         this.statBox('最高仰角', `${this.detail.maxElevationDeg.toFixed(0)}°`)

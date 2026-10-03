@@ -71,6 +71,10 @@
     {
       "name": "reason_location",
       "value": "用于读取您的当前位置作为卫星过境预测的观测站坐标。"
+    },
+    {
+      "name": "reason_microphone",
+      "value": "用于在过境详情页录制通联音频，录音仅保存在本机。"
     }
   ]
 }

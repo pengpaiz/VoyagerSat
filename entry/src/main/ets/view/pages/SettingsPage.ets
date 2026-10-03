@@ -1,12 +1,16 @@
-import { promptAction } from '@kit.ArkUI';
+﻿import { promptAction } from '@kit.ArkUI';
 import { qthToPosition, positionToQth } from '../../domain/qth/QthConverter';
-import { AppSettings, WINDOW_PRESETS } from '../../common/AppSettings';
+import { AppSettings, WINDOW_PRESETS, CUSTOM_RESULT_FAIL, CUSTOM_RESULT_NONE, CUSTOM_RESULT_OK } from '../../common/AppSettings';
 import { Locator } from '../../common/Locator';
 import { SatelliteApp } from '../../common/SatelliteApp';
 import { SelectedSats } from '../../common/SelectedSats';
 import { CN_TLE_URL, SatelliteDownloader } from '../../data/downloader/SatelliteDownloader';
 import { ENTER_SCALE, PRESS_IN_MS, PRESS_OUT_MS, PRESS_SCALE } from '../components/PressFx';
-import { TAB_BAR_CLEARANCE } from '../../common/LayoutMetrics';
+import { ElevationSlider } from '../components/ElevationSlider';
+import { KEY_BAR_CLEARANCE, TAB_BAR_CLEARANCE } from '../../common/LayoutMetrics';
+
+/** 预测窗口可用上限（小时）：与过境计算窗口一致（见 PassCache.PASS_CACHE_HOURS） */
+const MAX_WINDOW_HOURS = 48;
 
 @Component
 export struct SettingsPage {
@@ -21,6 +25,8 @@ export struct SettingsPage {
   @State minElevation: number = 5;
   @State pressedBtn: string = '';
   @State btnEntered: boolean = false;
+  /** 底部预留（由 Index 按栏高+导航条避让算出后发布） */
+  @StorageProp(KEY_BAR_CLEARANCE) barClearance: number = TAB_BAR_CLEARANCE;
   @State tleUrlText: string = '';
   @State transUrlText: string = '';
   @State updating: boolean = false;
@@ -28,6 +34,14 @@ export struct SettingsPage {
   @State winFx: number = 1;
   @StorageLink('settings_window_hours') windowHours: number = 24;
   @StorageProp('station_version') @Watch('onStationChanged') stationVersion: number = 0;
+  /** 数据源使用情况（随更新实时刷新显示） */
+  @StorageProp('data_source_last_url') lastSrcUrl: string = '';
+  @StorageProp('data_source_last_time') srcLastTime: number = 0;
+  @StorageProp('data_source_custom_time') srcCustomTime: number = 0;
+  /** 自定义地址最近一次使用结果：0 未更新 / 1 成功 / 2 失败 */
+  @StorageProp('data_source_custom_result') srcCustomResult: number = CUSTOM_RESULT_NONE;
+  /** 内置镜像（打包快照）的版本时间 */
+  @StorageProp('builtin_snapshot_time') builtinSnapshotTime: number = 0;
   private wasLoaded: boolean = false;
   private app: SatelliteApp = SatelliteApp.getInstance();
 
@@ -107,12 +121,41 @@ export struct SettingsPage {
 
   // ---- 自定义数据源 ----
 
-  private currentSourceHint(): string {
+  /** 当前实际生效的渠道（按最近一次成功更新判断） */
+  private sourceModeText(): string {
     const custom = AppSettings.getCustomTleUrl();
     if (custom.length === 0) {
-      return `当前：内置镜像 ${CN_TLE_URL}`;
+      return '内置镜像';
     }
-    return `当前：自定义 ${custom}`;
+    if (this.lastSrcUrl.length === 0) {
+      return '自定义地址（还没成功更新过）';
+    }
+    if (this.lastSrcUrl === custom) {
+      return '自定义地址';
+    }
+    if (this.lastSrcUrl === CN_TLE_URL) {
+      return '自定义地址（上次失败，已回退内置镜像）';
+    }
+    return '自定义地址';
+  }
+
+  private customTimeText(): string {
+    if (AppSettings.getCustomTleUrl().length === 0) {
+      return '未填写';
+    }
+    if (this.srcCustomResult === CUSTOM_RESULT_OK) {
+      return `成功 · ${AppSettings.formatTime(this.srcCustomTime)}`;
+    }
+    if (this.srcCustomResult === CUSTOM_RESULT_FAIL) {
+      return '失败';
+    }
+    return '未更新过';
+  }
+
+  /** 数据状态里的更新时间：优先"最近一次成功更新"，否则用内置镜像版本时间 */
+  private dataTimeText(): string {
+    const t = this.srcLastTime > 0 ? this.srcLastTime : this.builtinSnapshotTime;
+    return AppSettings.formatTime(t);
   }
 
   private async saveAndUpdateSource(): Promise<void> {
@@ -191,13 +234,6 @@ export struct SettingsPage {
     return `${s.latitude.toFixed(4)}, ${s.longitude.toFixed(4)}, ${s.altitude.toFixed(0)}m${suffix}`;
   }
 
-  private onMinElevationChange(v: number, mode: SliderChangeMode): void {
-    this.minElevation = Math.round(v);
-    if (mode === SliderChangeMode.End) {
-      AppSettings.setMinElevation(this.minElevation);
-    }
-  }
-
   private onWindowChange(v: number): void {
     this.windowHours = v;
   }
@@ -258,7 +294,7 @@ export struct SettingsPage {
         }
         .width('100%')
         // 底部预留悬浮胶囊栏空间，保证最后一个卡片能滚到胶囊上方
-        .padding({ left: 16, right: 16, bottom: TAB_BAR_CLEARANCE })
+        .padding({ left: 16, right: 16, bottom: this.barClearance })
       }
       .layoutWeight(1)
       .width('100%')
@@ -297,6 +333,18 @@ export struct SettingsPage {
       .rowsGap(8)
       .width('100%')
 
+      // 数据更新时间：最近一次成功更新；从未联网更新过时显示内置镜像（打包快照）的版本时间
+      Row() {
+        Text('更新时间')
+          .fontSize(12)
+          .fontColor($r('app.color.color_text_secondary'))
+        Blank()
+        Text(this.dataTimeText())
+          .fontSize(12)
+          .fontColor($r('app.color.color_text'))
+      }
+      .width('100%')
+
       Button('刷新数据')
         .width('100%')
         .fontSize(14)
@@ -330,12 +378,40 @@ export struct SettingsPage {
       }
       .width('100%')
 
-      Text(this.currentSourceHint())
-        .fontSize(11)
-        .fontColor($r('app.color.color_text_secondary'))
-        .width('100%')
-        .maxLines(2)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
+      // 当前使用的模式 + 两个渠道各自最近一次成功更新的时间
+      Row() {
+        Text('当前模式')
+          .fontSize(11)
+          .fontColor($r('app.color.color_text_secondary'))
+        Blank()
+        Text(this.sourceModeText())
+          .fontSize(11)
+          .fontColor($r('app.color.color_primary'))
+      }
+      .width('100%')
+
+      // 内置镜像（打包快照）的版本时间：与是否联网无关，标明随包发布的数据版本
+      Row() {
+        Text('内置镜像版本')
+          .fontSize(11)
+          .fontColor($r('app.color.color_text_secondary'))
+        Blank()
+        Text(AppSettings.formatTime(this.builtinSnapshotTime))
+          .fontSize(11)
+          .fontColor($r('app.color.color_text'))
+      }
+      .width('100%')
+
+      Row() {
+        Text('自定义地址更新')
+          .fontSize(11)
+          .fontColor($r('app.color.color_text_secondary'))
+        Blank()
+        Text(this.customTimeText())
+          .fontSize(11)
+          .fontColor($r('app.color.color_text'))
+      }
+      .width('100%')
 
       TextInput({ placeholder: '卫星', text: this.tleUrlText })
         .width('100%')
@@ -383,7 +459,7 @@ export struct SettingsPage {
       }
       .width('100%')
 
-      Text('支持 TLE 三行文本或 Celestrak CSV；自定义源优先，失败自动回退内置镜像。')
+      Text('默认使用内置镜像更新；填写自定义地址后优先使用该地址（支持 TLE 三行或 CSV）。')
         .fontSize(11)
         .fontColor($r('app.color.color_text_secondary'))
         .width('100%')
@@ -528,23 +604,14 @@ export struct SettingsPage {
   private sectionForecast() {
     Column({ space: 10 }) {
       Text('过境预报').fontSize(14).fontWeight(FontWeight.Bold).fontColor($r('app.color.color_text'))
-      Row() {
-        Text('最低过境仰角').fontSize(14).fontColor($r('app.color.color_text'))
-        Blank()
-        Text(`${this.minElevation}°`).fontSize(14).fontColor($r('app.color.color_primary'))
-      }
-      .width('100%')
-      Slider({
-        value: this.minElevation,
-        min: 0,
-        max: 40,
-        step: 1,
-        style: SliderStyle.OutSet
+      // 滑动条拆成独立组件：拖动只重绘它自己，松手才提交（避免逐帧重建整页）
+      ElevationSlider({
+        initialValue: this.minElevation,
+        onCommit: (v: number): void => {
+          this.minElevation = v;
+          AppSettings.setMinElevation(v);
+        }
       })
-        .width('100%')
-        .onChange((value: number, mode: SliderChangeMode): void => {
-          this.onMinElevationChange(value, mode)
-        })
 
       Divider().color($r('app.color.color_divider'))
 
@@ -599,7 +666,7 @@ export struct SettingsPage {
 
       if (this.customSelected) {
         Row({ space: 8 }) {
-          TextInput({ placeholder: '小时 (h)', text: this.customWindowText })
+          TextInput({ placeholder: '小时 (h)，最大 48', text: this.customWindowText })
             .layoutWeight(1)
             .type(InputType.Number)
             .height(36)
@@ -635,8 +702,9 @@ export struct SettingsPage {
 
   private applyCustomWindow(): void {
     const v = Number(this.customWindowText);
-    if (Number.isNaN(v) || v <= 0 || v > 720) {
-      promptAction.showToast({ message: '请输入 1-720 之间的小时数' });
+    // 过境计算窗口上限就是 48h（PassCache.PASS_CACHE_HOURS），超过 48 填了也不会有数据
+    if (Number.isNaN(v) || v <= 0 || v > MAX_WINDOW_HOURS) {
+      promptAction.showToast({ message: `请输入 1-${MAX_WINDOW_HOURS} 之间的小时数` });
       return;
     }
     this.getUIContext().animateTo({ duration: 320, curve: Curve.Friction }, (): void => {

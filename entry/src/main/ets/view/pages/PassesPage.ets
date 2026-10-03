@@ -1,18 +1,26 @@
-import { SatelliteApp } from '../../common/SatelliteApp';
+﻿import { SatelliteApp } from '../../common/SatelliteApp';
 import { SelectedSats } from '../../common/SelectedSats';
 import { AppSettings, PassSortMode } from '../../common/AppSettings';
 import { SAT_COLORS } from '../../common/SatColors';
 import { SatPassEvent } from '../../domain/predict/SatPassFinder';
 import { PassCache } from '../../domain/predict/PassCache';
 import { PassDetailSheet, PassDetailPayload } from '../components/PassDetailSheet';
-import { hilog } from '@kit.PerformanceAnalysisKit';
-import { TAB_BAR_CLEARANCE } from '../../common/LayoutMetrics';
+import { Logger } from '../../common/Logger';
+import { KEY_BAR_CLEARANCE, TAB_BAR_CLEARANCE } from '../../common/LayoutMetrics';
 
 const TAB_PASSES = 2;
+/** 过境页视图状态：加载中 / 有数据 / 确实为空（避免把"还没算完"当成"无数据"） */
+enum PassViewState {
+  LOADING = 0,
+  READY = 1,
+  EMPTY = 2
+}
 /** 切到过境页/启动后延后多久开算（先让首屏与入场动画跑完） */
 const PASS_START_DELAY_MS = 200;
 /** 每补算一颗星让出多久：给渲染留帧，选星多时也不会长阻塞 */
 const PASS_YIELD_MS = 24;
+/** 每补算多少颗星才提交一次 UI（合并重绘） */
+const PASS_UI_COMMIT_EVERY = 5;
 const NOW_REFRESH_MS = 1000;
 
 class PassSat {
@@ -98,6 +106,10 @@ export struct PassesPage {
   @State trackCount: number = 0;
   @State nowTs: number = Date.now();
   @State nextPass: FlatPass | null = null;
+  /** 视图状态：区分"加载中/有数据/确实为空" */
+  @State viewState: PassViewState = PassViewState.LOADING;
+  /** 底部预留（由 Index 按栏高+导航条避让算出后发布） */
+  @StorageProp(KEY_BAR_CLEARANCE) barClearance: number = TAB_BAR_CLEARANCE;
 
   private dirty: boolean = false;
   private app: SatelliteApp = SatelliteApp.getInstance();
@@ -181,14 +193,18 @@ export struct PassesPage {
     if (cats.length === 0) {
       this.groups = [];
       this.flatPasses = [];
+      this.viewState = this.app.hasStoreLoaded() ? PassViewState.EMPTY : PassViewState.LOADING;
       this.refreshNextPass();
       return;
     }
     const store = this.app.getStore();
     const station = AppSettings.getStation();
     cache.prepare(this.dataVersion);
-    // 先用已有缓存渲染一版（切页/改窗口/改排序基本瞬时）
-    this.publishGroups(cats, cache);
+    if (this.viewState !== PassViewState.READY) {
+      this.viewState = PassViewState.LOADING;
+    }
+    // 先用已有缓存渲染一版（切页/改窗口/改排序基本瞬时）；计算中暂无结果时保留旧数据
+    this.publishGroups(cats, cache, false);
     for (let i = 0; i < cats.length; i++) {
       if (seq !== this.computeSeq) {
         return;
@@ -207,13 +223,25 @@ export struct PassesPage {
       if (seq !== this.computeSeq) {
         return;
       }
-      this.publishGroups(cats, cache);
+      // 每 5 颗才提交一次 UI（§18/§19：避免逐颗重绘），最后一颗一定提交
+      if ((i + 1) % PASS_UI_COMMIT_EVERY === 0 || i === cats.length - 1) {
+        this.publishGroups(cats, cache, false);
+      }
     }
-    this.refreshNextPass();
+    // 最终提交前再确认没被更新的请求取代（防止旧结果覆盖新结果）
+    if (seq !== this.computeSeq) {
+      return;
+    }
+    this.publishGroups(cats, cache, true);
   }
 
-  /** 把缓存结果整理成列表数据（按当前排序方式）。 */
-  private publishGroups(cats: number[], cache: PassCache): void {
+  /**
+   * 把缓存结果整理成列表数据。
+   * 同时维护「按卫星」和「按时间」两份列表：排序方式切换时立即可用，
+   * 不会出现「切换后当前列表为空 → 闪一下无数据」。
+   * [isFinal] 为 false 表示还在补算：此时若暂无结果则保留旧数据不提交。
+   */
+  private publishGroups(cats: number[], cache: PassCache, isFinal: boolean): void {
     const satList: PassSat[] = [];
     for (let i = 0; i < cats.length; i++) {
       const cat = cats[i];
@@ -222,30 +250,45 @@ export struct PassesPage {
       }
       satList.push(new PassSat(cat, cache.nameOf(cat), SAT_COLORS[i % SAT_COLORS.length], cache.passesOf(cat)));
     }
-    if (this.sortMode === PassSortMode.BY_SATELLITE) {
-      satList.sort((a: PassSat, b: PassSat): number => a.name.localeCompare(b.name));
-      this.groups = satList;
-      this.flatPasses = [];
-    } else {
-      const flat: FlatPass[] = [];
-      for (let i = 0; i < satList.length; i++) {
-        const s = satList[i];
-        for (let j = 0; j < s.passes.length; j++) {
-          flat.push(new FlatPass(s.catnum, s.name, s.color, s.passes[j]));
-        }
+    const hasData = satList.length > 0;
+    if (!hasData && !isFinal && this.hasRenderedData()) {
+      // 还在计算、暂无结果：保留上一次的列表，避免「旧数据 → 无数据 → 新数据」
+      return;
+    }
+
+    const flat: FlatPass[] = [];
+    for (let i = 0; i < satList.length; i++) {
+      const s = satList[i];
+      for (let j = 0; j < s.passes.length; j++) {
+        flat.push(new FlatPass(s.catnum, s.name, s.color, s.passes[j]));
       }
-      flat.sort((a: FlatPass, b: FlatPass): number => {
-        const ta = this.distanceToPass(a.pass);
-        const tb = this.distanceToPass(b.pass);
-        if (ta !== tb) {
-          return ta - tb;
-        }
-        return a.pass.aosTime - b.pass.aosTime;
-      });
-      this.flatPasses = flat;
-      this.groups = [];
+    }
+    flat.sort((a: FlatPass, b: FlatPass): number => {
+      const ta = this.distanceToPass(a.pass);
+      const tb = this.distanceToPass(b.pass);
+      if (ta !== tb) {
+        return ta - tb;
+      }
+      return a.pass.aosTime - b.pass.aosTime;
+    });
+    satList.sort((a: PassSat, b: PassSat): number => a.name.localeCompare(b.name));
+    // 两份列表都保持最新，排序切换无需等待重算
+    this.groups = satList;
+    this.flatPasses = flat;
+
+    if (hasData) {
+      this.viewState = PassViewState.READY;
+    } else if (!this.app.hasStoreLoaded()) {
+      this.viewState = PassViewState.LOADING;
+    } else {
+      this.viewState = isFinal ? PassViewState.EMPTY : PassViewState.LOADING;
     }
     this.refreshNextPass();
+  }
+
+  /** 当前是否已渲染出内容（用于判断"能不能保留旧数据"）。 */
+  private hasRenderedData(): boolean {
+    return this.groups.length > 0 || this.flatPasses.length > 0;
   }
 
   /** 让帧：把主线程还给渲染，避免连续补算造成卡顿。 */
@@ -337,7 +380,7 @@ export struct PassesPage {
     const payload = PassDetailSheet.buildPayload(catnum, pass, color);
     this.detailPayload = payload;
     this.showDetail = true;
-    hilog.info(0x0001, 'PassOpen', `seq=${seq} cat=${catnum} name=${payload.name} show=${this.showDetail}`);
+    Logger.debug('PassOpen', `seq=${seq} cat=${catnum} name=${payload.name} show=${this.showDetail}`);
     if (!payload.hasTransponders) {
       this.waitForTransponders(catnum, pass, color, seq, 0);
     }
@@ -384,17 +427,17 @@ export struct PassesPage {
   build() {
     Column() {
       this.headerBar()
-      if (this.hasData()) {
+      // 三态显示：加载中 / 有数据 / 确实为空（"数据还没算完"不再冒充"无数据"）
+      if (this.viewState === PassViewState.READY) {
         if (this.sortMode === PassSortMode.BY_SATELLITE) {
           this.satelliteView()
         } else {
           this.flatTimeView()
         }
-      } else if (this.app.hasStoreLoaded()) {
-        this.emptyView()
-      } else {
-        // 本地数据还在加载：显示加载态，避免闪一下"暂无过境数据"
+      } else if (this.viewState === PassViewState.LOADING) {
         this.loadingView()
+      } else {
+        this.emptyView()
       }
     }
     .width('100%')
@@ -404,13 +447,6 @@ export struct PassesPage {
       detents: [SheetSize.LARGE],
       showClose: false
     })
-  }
-
-  private hasData(): boolean {
-    if (this.sortMode === PassSortMode.BY_SATELLITE) {
-      return this.groups.length > 0;
-    }
-    return this.visibleFlatCount() > 0;
   }
 
   private passVisible(p: SatPassEvent): boolean {
@@ -579,7 +615,7 @@ export struct PassesPage {
         })
       }
       .width('100%')
-      .padding({ left: 14, right: 14, top: 14, bottom: TAB_BAR_CLEARANCE })
+      .padding({ left: 14, right: 14, top: 14, bottom: this.barClearance })
     }
     .layoutWeight(1)
     .width('100%')
@@ -600,7 +636,7 @@ export struct PassesPage {
         })
       }
       .width('100%')
-      .padding({ left: 14, right: 14, top: 14, bottom: TAB_BAR_CLEARANCE })
+      .padding({ left: 14, right: 14, top: 14, bottom: this.barClearance })
     }
     .layoutWeight(1)
     .width('100%')
