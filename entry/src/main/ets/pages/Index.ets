@@ -9,7 +9,8 @@ import { Favorites } from '../common/Favorites';
 import { AppSettings } from '../common/AppSettings';
 import { CalendarForecast } from '../domain/predict/CalendarForecast';
 import { KEY_BAR_CLEARANCE } from '../common/LayoutMetrics';
-import { curves, uiMaterial, window } from '@kit.ArkUI';
+import { immersiveThinMaterial } from '../common/SystemMaterial';
+import { curves, window } from '@kit.ArkUI';
 
 /** 默认停留标签（2 = 过境） */
 const DEFAULT_TAB = 2;
@@ -400,11 +401,7 @@ struct Index {
             .borderRadius(999)
             .backgroundColor(BAR_CAPSULE_TINT)
             .backgroundBlurStyle(BlurStyle.Thin)
-            .systemMaterial(new uiMaterial.ImmersiveMaterial({
-              style: uiMaterial.ImmersiveStyle.THIN,
-              applyShadow: true,
-              interactive: true
-            }))
+            .systemMaterial(immersiveThinMaterial())
             .shadow({ radius: 14, color: '#26000000', offsetY: 4 })
 
           // 高亮胶囊：跟随手势滑动，标识当前页签

@@ -1,12 +1,13 @@
 ﻿import { SatelliteApp } from '../../common/SatelliteApp';
 import { SatelliteDataSource } from '../../data/storage/SatelliteStore';
 import { SatOrbitalData } from '../../domain/predict/OrbitalData';
-import { promptAction, uiMaterial } from '@kit.ArkUI';
+import { promptAction } from '@kit.ArkUI';
 import { ISS_CATNUM } from '../../common/SatelliteApp';
 import { SelectedSats } from '../../common/SelectedSats';
 import { Favorites } from '../../common/Favorites';
 import { ENTER_SCALE, PRESS_IN_MS, PRESS_OUT_MS, PRESS_SCALE } from '../components/PressFx';
 import { KEY_BAR_CLEARANCE, TAB_BAR_CLEARANCE } from '../../common/LayoutMetrics';
+import { immersiveThinMaterial } from '../../common/SystemMaterial';
 
 /** 查询串是否纯数字：只有纯数字才需要比 NORAD 编号。 */
 function isDigits(q: string): boolean {
@@ -619,11 +620,7 @@ export struct SatelliteListPage {
       .alignItems(HorizontalAlign.Center)
       .backgroundColor($r('app.color.color_card'))
       .backgroundBlurStyle(BlurStyle.Thin)
-      .systemMaterial(new uiMaterial.ImmersiveMaterial({
-        style: uiMaterial.ImmersiveStyle.THIN,
-        applyShadow: true,
-        interactive: true
-      }))
+      .systemMaterial(immersiveThinMaterial())
       .shadow({ radius: 12, color: '#26000000', offsetY: 3 })
       .opacity(0.94)
       .scale({ x: this.pressScale(`fab-${action}`), y: this.pressScale(`fab-${action}`) })
