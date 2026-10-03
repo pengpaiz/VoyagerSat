@@ -62,14 +62,13 @@ HarmonyOS 版本相关问题及功能建议请提交至本项目 GitHub Issues�
 
 - “卫星”类用于更新 TLE / OMM（过境预报用的轨道根数），格式含 TLE 三行、3LE、CSV（Celestrak FORMAT=csv）、带 ZIP 压缩的 TLE。
 - “接收器”类用于更新转发器/收发信机数据（转发器频率、模式），格式为 JSON（SatNOGS / r4uab / 本项目镜像）。
-- 括号里标注了来源与格式，★ 表示本项目（dfh.tys）当前使用/支持的渠道。
 
 ---
 
 #### 一、卫星（TLE / OMM）
 
 ★ 1. https://tledata.xanyi.eu.org/tledata/all.txt  
-     来源：本项目内置镜像（默认渠道）｜格式：TLE 三行｜一次性包含全部卫星  
+     来源：本项目内置本地镜像（默认渠道）｜格式：TLE 三行｜一次性包含全部卫星  
    2. https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=csv  
      来源：Celestrak｜格式：CSV｜最全的在轨活跃卫星  
    3. https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle  
